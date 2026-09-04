@@ -42,3 +42,8 @@ Al publicar, el SWF queda almacenado en Supabase Storage y FlashVault lo carga c
 ## Nota sobre seguridad
 
 GitHub Pages es estático, por lo que todo JavaScript enviado al navegador es visible. No existe una "clave super secreta" segura dentro del HTML/JS. Por eso este proyecto usa el modelo correcto: el navegador posee solamente la clave pública/publishable de Supabase y RLS impide insertar juegos a quien no sea tu usuario administrador.
+
+
+### Ruffle Nightly
+
+FlashVault usa el canal oficial `nightly` de Ruffle mediante UNPKG. Esto hace que el reproductor web se actualice automáticamente a la nightly publicada más reciente. Ruffle indica que las nightlies son builds diarios con correcciones y mejoras antes de llegar a las versiones estables.
