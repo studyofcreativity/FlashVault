@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlashVault — Juegos Flash</title>
+  <meta name="description" content="FlashVault: biblioteca para jugar juegos Flash directamente en el navegador con Ruffle.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%237c3aed'/%3E%3Cpath d='M58 10 27 55h24L42 90l34-49H52z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#home" aria-label="FlashVault inicio">
+      <span class="brand-mark">⚡</span>
+      <span>Flash<span>Vault</span></span>
+    </a>
+    <nav>
+      <a href="#home">Inicio</a>
+      <a href="#games">Juegos</a>
+      <button id="adminOpen" class="nav-button">Panel privado</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="home" class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">LA BÓVEDA DE FLASH</p>
+        <h1>Juega tus clásicos Flash <span>directamente aquí.</span></h1>
+        <p class="hero-text">Una biblioteca sencilla para publicar tus juegos SWF y hacer que la gente los juegue desde el navegador con Ruffle.</p>
+        <div class="hero-actions">
+          <a class="primary" href="#games">Explorar juegos</a>
+          <button class="secondary" id="heroAdmin">Publicar un juego</button>
+        </div>
+      </div>
+      <div class="hero-card">
+        <div class="hero-card-top"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="window-title">FlashVault Player</span></div>
+        <div class="hero-card-screen">
+          <div class="zap">⚡</div>
+          <strong>Ruffle Player</strong>
+          <small>Flash revive aquí</small>
+        </div>
+      </div>
+    </section>
+
+    <section id="games" class="section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">BIBLIOTECA</p>
+          <h2>Juegos publicados</h2>
+        </div>
+        <input id="search" class="search" type="search" placeholder="Buscar juegos..." autocomplete="off">
+      </div>
+      <div id="status" class="status">Cargando biblioteca…</div>
+      <div id="gamesGrid" class="games-grid"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>⚡ FlashVault</span>
+    <span>Reproducción mediante Ruffle.</span>
+  </footer>
+
+  <div id="playerModal" class="modal" aria-hidden="true">
+    <div class="modal-backdrop" data-close="player"></div>
+    <section class="modal-card player-card" role="dialog" aria-modal="true" aria-labelledby="playerTitle">
+      <button class="modal-close" data-close="player" aria-label="Cerrar">×</button>
+      <div class="player-title-wrap">
+        <p class="eyebrow">JUGANDO</p>
+        <h2 id="playerTitle">Juego</h2>
+      </div>
+      <div id="ruffleHost" class="ruffle-host"></div>
+      <p id="playerError" class="error-text hidden"></p>
+    </section>
+  </div>
+
+  <div id="adminModal" class="modal" aria-hidden="true">
+    <div class="modal-backdrop" data-close="admin"></div>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
+      <button class="modal-close" data-close="admin" aria-label="Cerrar">×</button>
+      <div id="adminLoginView">
+        <p class="eyebrow">SOLO ADMINISTRADOR</p>
+        <h2 id="adminTitle">Panel privado</h2>
+        <p class="muted">Inicia sesión con la cuenta de Supabase que autorizaste para publicar.</p>
+        <form id="loginForm" class="form">
+          <label>Correo<input id="email" type="email" required autocomplete="email"></label>
+          <label>Contraseña<input id="password" type="password" required autocomplete="current-password"></label>
+          <label>Clave extra (opcional)<input id="extraKey" type="password" placeholder="Tu clave local de publicación"></label>
+          <button class="primary full" type="submit">Entrar</button>
+          <p id="loginMessage" class="form-message"></p>
+        </form>
+      </div>
+
+      <div id="adminPublishView" class="hidden">
+        <div class="admin-head">
+          <div>
+            <p class="eyebrow">PUBLICADOR</p>
+            <h2>Subir juego</h2>
+            <p id="signedInAs" class="muted"></p>
+          </div>
+          <button id="logoutBtn" class="ghost">Cerrar sesión</button>
+        </div>
+        <form id="publishForm" class="form">
+          <label>Nombre del juego<input id="gameTitle" type="text" maxlength="80" required></label>
+          <label>Descripción<textarea id="gameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
+          <div class="two-col">
+            <label>Portada<input id="coverFile" type="file" accept="image/png,image/jpeg,image/webp" required></label>
+            <label>Juego Flash (.swf)<input id="swfFile" type="file" accept=".swf,application/x-shockwave-flash" required></label>
+          </div>
+          <button class="primary full" type="submit">Publicar en FlashVault</button>
+          <p id="publishMessage" class="form-message"></p>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
