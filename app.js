@@ -53,73 +53,35 @@
   async function playGame(id) {
     const game = games.find(x => x.id === id);
     if (!game) return;
-
-    const host = $('ruffleHost');
-    const errorBox = $('playerError');
     $('playerTitle').textContent = game.title;
-    errorBox.classList.add('hidden');
-    errorBox.textContent = '';
-    host.innerHTML = '<div class=\"player-loading\">Cargando juego…</div>';
+    $('playerError').classList.add('hidden');
+    $('ruffleHost').innerHTML = '';
     openModal('playerModal');
-
     try {
-      if (!window.RufflePlayer) {
-        throw new Error('Ruffle todavía no está listo. Recarga la página e inténtalo otra vez.');
-      }
-
+      if (!window.RufflePlayer) throw new Error('Ruffle todavía no está listo. Recarga la página e inténtalo otra vez.');
       const factory = window.RufflePlayer.newest();
       const player = factory.createPlayer();
-      player.config = {
+      const api = player.ruffle ? player.ruffle() : player;
+      api.config = {
         allowNetworking: 'all',
-        openUrlMode: 'confirm',
         allowFullscreen: true,
+        compatibilityRules: true,
+        autoplay: 'auto',
+        upgradeToHttps: true,
+        preferredRenderer: 'wgpu-webgl',
+        wmode: 'opaque',
         quality: 'high',
         scale: 'showAll',
-        wmode: 'opaque',
-        preferredRenderer: 'webgl'
+        letterbox: 'fullscreen',
+        showSwfDownload: false,
+        contextMenu: true,
+        splashScreen: false
       };
-
-      host.innerHTML = '';
-      host.appendChild(player);
-
-      if (typeof player.set === 'function') {
-        try { player.set('allowNetworking', 'all'); } catch (_) {}
-      }
-
-      if (typeof player.set_traceObserver === 'function') {
-        player.set_traceObserver((message) => console.debug('[Ruffle]', message));
-      } else if ('traceObserver' in player) {
-        player.traceObserver = (message) => console.debug('[Ruffle]', message);
-      }
-
-      const loadOptions = {
-        url: game.swf_url,
-        allowNetworking: 'all',
-        openUrlMode: 'confirm',
-        allowFullscreen: true,
-        quality: 'high',
-        scale: 'showAll',
-        wmode: 'opaque',
-        preferredRenderer: 'webgl'
-      };
-
-      const api = typeof player.ruffle === 'function' ? player.ruffle() : player;
-      await api.load(loadOptions);
-
-      // Give old movies a little time to begin their first frame. Some legacy
-      // SWFs perform network checks during startup and otherwise look blank.
-      window.setTimeout(() => {
-        const rect = host.getBoundingClientRect();
-        if (!host.querySelector('ruffle-player') || rect.height < 20) return;
-        const canvas = host.querySelector('canvas');
-        if (canvas && canvas.width > 0 && canvas.height > 0) return;
-        errorBox.textContent = 'El juego cargó, pero su película Flash no mostró un primer fotograma. Puede requerir una característica de Flash que Ruffle todavía no reproduce.';
-        errorBox.classList.remove('hidden');
-      }, 4500);
+      $('ruffleHost').appendChild(player);
+      await api.load({ url: game.swf_url });
     } catch (err) {
-      console.error('[FlashVault] Error al cargar el SWF:', err);
-      errorBox.innerHTML = `${esc(err?.message || 'No se pudo iniciar el juego.')}<br><small>Ruffle sí inició, pero el archivo no pudo comenzar correctamente. Revisa la consola (F12) si necesitas el diagnóstico.</small>`;
-      errorBox.classList.remove('hidden');
+      $('playerError').textContent = err.message || 'No se pudo iniciar el juego.';
+      $('playerError').classList.remove('hidden');
     }
   }
 
