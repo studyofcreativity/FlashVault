@@ -62,3 +62,7 @@ window.FLASHVAULT_CONFIG = {
 ```
 
 El UID no sustituye a Supabase Auth ni a las políticas RLS. La comprobación evita que el panel de diagnóstico aparezca para otras cuentas, pero cualquier dato enviado al navegador no debe considerarse un secreto criptográfico.
+
+
+### Paquetes con loader
+FlashVault detecta wrappers HTML dentro del ZIP que incrustan un SWF loader y extrae sus FlashVars. Esto es necesario para paquetes antiguos como Inkagames, donde el loader es el que inicia el juego principal.

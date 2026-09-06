@@ -111,6 +111,23 @@
     return user || null;
   }
 
+  function decodeLaunchFragment(value) {
+    const raw = String(value || '');
+    const marker = '#flashvault-flashvars=';
+    const idx = raw.indexOf(marker);
+    if (idx < 0) return { url: raw, parameters: null };
+    const url = raw.slice(0, idx);
+    try {
+      const encoded = raw.slice(idx + marker.length);
+      const bin = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
+      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+      const json = new TextDecoder().decode(bytes);
+      return { url, parameters: JSON.parse(json) };
+    } catch (_) {
+      return { url, parameters: null };
+    }
+  }
+
   async function playGame(id) {
     const game = games.find(x => x.id === id);
     if (!game) return;
@@ -173,28 +190,40 @@
         player.__flashVaultFullscreenCleanup = () => document.removeEventListener('fullscreenchange', onFullscreenChange);
       }
 
-      // For multi-resource packages, tell the compatibility layer and Ruffle
-      // where the preserved package tree lives. This lets old SWFs request
-      // files using their original relative/absolute paths.
+      // Multi-resource packages can contain an HTML wrapper/loader. For old
+      // Inkagames games, loading the largest SWF directly is NOT enough: the
+      // loader receives FlashVars and then loads the real game SWF.
+      let loadUrl = game.swf_url;
+      let flashvars = undefined;
+      let packageBase = null;
+
       if (game.game_type === 'package' && game.package_path) {
         const packageRoot = sb.storage.from('flash-games').getPublicUrl(game.package_path).data.publicUrl;
         window.FLASHVAULT_PACKAGE_ROOT = packageRoot.endsWith('/') ? packageRoot : packageRoot + '/';
-        player.config = { ...player.config, base: window.FLASHVAULT_PACKAGE_ROOT };
+
+        const decoded = decodeLaunchFragment(loadUrl);
+        loadUrl = decoded.url;
+        flashvars = decoded.parameters;
+
+        // swf_url points at the package entry SWF. Its directory is the base
+        // for relative requests made by the entry/loader SWF.
+        try {
+          const u = new URL(loadUrl);
+          packageBase = u.href.substring(0, u.href.lastIndexOf('/') + 1);
+          player.config = { ...player.config, base: packageBase };
+        } catch (_) {}
       } else {
         window.FLASHVAULT_PACKAGE_ROOT = null;
       }
 
-      if (typeof api.load === 'function') {
-        await api.load({
-          url: game.swf_url,
-          ...(game.game_type === 'package' && game.package_path ? { base: window.FLASHVAULT_PACKAGE_ROOT } : {})
-        });
-      } else {
-        await player.load({
-          url: game.swf_url,
-          ...(game.game_type === 'package' && game.package_path ? { base: window.FLASHVAULT_PACKAGE_ROOT } : {})
-        });
-      }
+      const loadOptions = {
+        url: loadUrl,
+        ...(packageBase ? { base: packageBase } : {}),
+        ...(flashvars && Object.keys(flashvars).length ? { parameters: flashvars } : {})
+      };
+
+      if (typeof api.load === 'function') await api.load(loadOptions);
+      else await player.load(loadOptions);
 
     } catch (err) {
       $('playerError').textContent = err.message || 'No se pudo iniciar el juego.';
@@ -400,6 +429,74 @@
   });
   $('changeUploadType').addEventListener('click', showUploadTypeChooser);
 
+  function encodeLaunchFragment(parameters) {
+    const json = JSON.stringify(parameters || {});
+    const bytes = new TextEncoder().encode(json);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function parseFlashVars(value) {
+    const out = {};
+    const text = String(value || '').replace(/&amp;/gi, '&');
+    for (const part of text.split('&')) {
+      if (!part) continue;
+      const i = part.indexOf('=');
+      const key = i >= 0 ? part.slice(0, i) : part;
+      const val = i >= 0 ? part.slice(i + 1) : '';
+      if (key) out[key] = val;
+    }
+    return out;
+  }
+
+  function resolvePackagePath(htmlPath, src) {
+    try {
+      const clean = String(src || '').split('#')[0].split('?')[0];
+      const u = new URL(clean, 'https://package.local/' + htmlPath);
+      if (u.hostname !== 'package.local') {
+        const path = u.pathname.replace(/^\/+/, '');
+        return `${u.hostname}/${path}`.replace(/\/+$/, '');
+      }
+      return u.pathname.replace(/^\/+/, '');
+    } catch (_) {
+      return String(src || '').replace(/^\/+/, '');
+    }
+  }
+
+  function findPackageEntry(normalized) {
+    const byPath = new Map(normalized.map(x => [x.path.toLowerCase(), x.path]));
+    const htmlCandidates = normalized.filter(x => /\.(html?|xhtml)$/i.test(x.path));
+
+    // Prefer an HTML wrapper that explicitly embeds a SWF and provides FlashVars.
+    for (const item of htmlCandidates) {
+      const html = item.text || '';
+      const srcMatch = html.match(/(?:src|data)\s*=\s*["']([^"']+\.swf(?:\?[^"']*)?)["']/i);
+      if (!srcMatch) continue;
+      const swfPath = resolvePackagePath(item.path, srcMatch[1]);
+      const actual = byPath.get(swfPath.toLowerCase());
+      if (!actual) continue;
+      const fvMatch = html.match(/flashvars\s*=\s*["']([^"']*)["']/i);
+      const params = parseFlashVars(fvMatch ? fvMatch[1] : '');
+      return { path: actual, parameters: params, wrapper: item.path };
+    }
+
+    // Otherwise prefer a likely game SWF, not a loader/preloader.
+    const swfs = normalized.filter(x => x.path.toLowerCase().endsWith('.swf'));
+    if (!swfs.length) return null;
+    const main = [...swfs].sort((a, b) => {
+      const score = (x) => {
+        const n = x.path.toLowerCase().split('/').pop();
+        let v = 0;
+        if (/^(game|main|index|play|start)[-_ ]?/.test(n)) v += 100;
+        if (/loader|preloader|loading/.test(n)) v -= 80;
+        return v;
+      };
+      return score(b) - score(a);
+    })[0];
+    return { path: main.path, parameters: null, wrapper: null };
+  }
+
   async function uploadPackage(slug, zipFile) {
     if (!window.JSZip) throw new Error('No se pudo cargar el lector ZIP. Recarga la página e inténtalo de nuevo.');
     const zip = await JSZip.loadAsync(zipFile);
@@ -411,20 +508,16 @@
       path: entry.name.replace(/\\/g, '/').replace(/^\/+/, '')
     })).filter(x => x.path && !x.path.includes('../'));
 
+    for (const item of normalized) {
+      if (/\.(html?|xhtml)$/i.test(item.path)) {
+        try { item.text = await item.entry.async('text'); } catch (_) { item.text = ''; }
+      }
+    }
+
     const swfs = normalized.filter(x => x.path.toLowerCase().endsWith('.swf'));
     if (!swfs.length) throw new Error('El ZIP no contiene ningún archivo .swf.');
-
-    // Prefer a SWF whose name looks like the main game; otherwise use the largest SWF.
-    const main = [...swfs].sort((a, b) => {
-      const score = (x) => {
-        const n = x.path.toLowerCase().split('/').pop();
-        let v = 0;
-        if (/^(game|main|index|play|start)[-_ ]?/.test(n)) v += 100;
-        if (/loader|preloader|loading/.test(n)) v -= 80;
-        return v;
-      };
-      return score(b) - score(a);
-    })[0];
+    const entry = findPackageEntry(normalized);
+    if (!entry) throw new Error('No se pudo determinar el SWF de entrada.');
 
     const root = `${slug}/`;
     let mainUrl = null;
@@ -436,13 +529,16 @@
       const storagePath = `${root}${item.path}`;
       await uploadFile('flash-games', storagePath, blob, contentType);
       uploaded++;
-      if (item === main) {
+      if (item.path === entry.path) {
         mainUrl = sb.storage.from('flash-games').getPublicUrl(storagePath).data.publicUrl;
       }
     }
 
-    if (!mainUrl) throw new Error('No se pudo determinar el SWF principal.');
-    return { mainUrl, packagePath: root, fileCount: uploaded, mainPath: `${root}${main.path}` };
+    if (!mainUrl) throw new Error('No se pudo obtener la URL del SWF de entrada.');
+    if (entry.parameters && Object.keys(entry.parameters).length) {
+      mainUrl += `#flashvault-flashvars=${encodeLaunchFragment(entry.parameters)}`;
+    }
+    return { mainUrl, packagePath: root, fileCount: uploaded, mainPath: `${root}${entry.path}`, parameters: entry.parameters, wrapper: entry.wrapper };
   }
 
   function guessContentType(path) {
