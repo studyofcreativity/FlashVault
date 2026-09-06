@@ -222,11 +222,26 @@
   }
 
   async function loadGames() {
-    const { data, error } = await sb
+    // Intentamos primero el esquema nuevo. Si la migración aún no se ejecutó,
+    // usamos automáticamente el esquema antiguo para que la biblioteca siga funcionando.
+    let result = await sb
       .from('games')
       .select('id,title,description,swf_url,cover_url,owner_id,created_at,game_type,package_path')
       .eq('published', true)
       .order('created_at', { ascending: false });
+
+    let data = result.data;
+    let error = result.error;
+
+    if (error && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
+      result = await sb
+        .from('games')
+        .select('id,title,description,swf_url,cover_url,owner_id,created_at')
+        .eq('published', true)
+        .order('created_at', { ascending: false });
+      data = (result.data || []).map(g => ({ ...g, game_type: 'single', package_path: null }));
+      error = result.error;
+    }
 
     if (error) {
       status.textContent = 'No se pudo cargar la biblioteca: ' + error.message;
@@ -456,11 +471,27 @@
         $('publishMessage').textContent = `Subidos ${result.fileCount} recursos. Publicando…`;
       }
 
-      const { error } = await sb.from('games').insert({
+      const newRow = {
         title, description, cover_url: coverUrlValue, swf_url: swfUrlValue,
         published: true, owner_id: user.id, game_type: gameType, package_path: packagePath
-      });
-      if (error) throw error;
+      };
+      let { error } = await sb.from('games').insert(newRow);
+
+      // Compatibilidad con bases antiguas: un juego de archivo único puede seguir
+      // publicándose mientras la migración todavía no se haya ejecutado.
+      if (error && gameType === 'single' && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
+        ({ error } = await sb.from('games').insert({
+          title, description, cover_url: coverUrlValue, swf_url: swfUrlValue,
+          published: true, owner_id: user.id
+        }));
+      }
+
+      if (error) {
+        if (gameType === 'package' && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
+          throw new Error('Tu Supabase todavía usa el esquema antiguo. Ejecuta supabase-migration-multi-resource.sql en SQL Editor y vuelve a intentarlo.');
+        }
+        throw error;
+      }
 
       $('publishMessage').textContent = '✓ Juego publicado correctamente.';
       $('publishForm').reset();
