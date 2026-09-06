@@ -259,7 +259,7 @@
       compatibilityRules: true,
       autoplay: 'on',
       playerRuntime: 'flashPlayer',
-      preferredRenderer: 'webgl',
+      preferredRenderer: 'canvas',
       upgradeToHttps: true,
       quality: 'high',
       scale: 'showAll',
