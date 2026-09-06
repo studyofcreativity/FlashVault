@@ -15,13 +15,31 @@
     } catch (_) {}
 
     if (CHECK_SERVER_RE.test(url)) {
-      return new Response('OK\n', {
+      const response = new Response('OK\n', {
         status: 200,
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Cache-Control': 'no-store'
         }
       });
+      // Some Ruffle/browser paths call response.json() even though the
+      // original Inkagames check_server.txt is plain text. Keep text()
+      // compatible with the original file, but make json() harmless too.
+      response.json = async () => ({ ok: true, value: 'OK' });
+      return response;
+    }
+
+    // A Flashpoint/Inkagames package can contain resources under several
+    // legacy domains. When the package was uploaded to Supabase, rewrite
+    // those absolute requests to the corresponding file inside the package.
+    const root = window.FLASHVAULT_PACKAGE_ROOT;
+    if (root && /^https?:\/\/(?:www\.)?(?:inkagames\.info|inkagames\.com|patajuegos\.com)(?:\/|$)/i.test(url)) {
+      try {
+        const u = new URL(url);
+        const packageBase = root.endsWith('/') ? root : root + '/';
+        const rewritten = packageBase + u.hostname + u.pathname.replace(/^\/+/, '') + u.search;
+        return nativeFetch(rewritten, init);
+      } catch (_) {}
     }
 
     return nativeFetch(input, init);

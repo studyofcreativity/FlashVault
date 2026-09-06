@@ -173,8 +173,28 @@
         player.__flashVaultFullscreenCleanup = () => document.removeEventListener('fullscreenchange', onFullscreenChange);
       }
 
-      if (typeof api.load === 'function') await api.load({ url: game.swf_url });
-      else await player.load({ url: game.swf_url });
+      // For multi-resource packages, tell the compatibility layer and Ruffle
+      // where the preserved package tree lives. This lets old SWFs request
+      // files using their original relative/absolute paths.
+      if (game.game_type === 'package' && game.package_path) {
+        const packageRoot = sb.storage.from('flash-games').getPublicUrl(game.package_path).data.publicUrl;
+        window.FLASHVAULT_PACKAGE_ROOT = packageRoot.endsWith('/') ? packageRoot : packageRoot + '/';
+        player.config = { ...player.config, base: window.FLASHVAULT_PACKAGE_ROOT };
+      } else {
+        window.FLASHVAULT_PACKAGE_ROOT = null;
+      }
+
+      if (typeof api.load === 'function') {
+        await api.load({
+          url: game.swf_url,
+          ...(game.game_type === 'package' && game.package_path ? { base: window.FLASHVAULT_PACKAGE_ROOT } : {})
+        });
+      } else {
+        await player.load({
+          url: game.swf_url,
+          ...(game.game_type === 'package' && game.package_path ? { base: window.FLASHVAULT_PACKAGE_ROOT } : {})
+        });
+      }
 
     } catch (err) {
       $('playerError').textContent = err.message || 'No se pudo iniciar el juego.';
