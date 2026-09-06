@@ -216,10 +216,26 @@
         window.FLASHVAULT_PACKAGE_ROOT = null;
       }
 
+      const packageRewriteRules = [];
+      if (game.game_type === 'package' && game.package_path) {
+        const root = window.FLASHVAULT_PACKAGE_ROOT;
+        // Ruffle performs SWF networking internally, so window.fetch cannot
+        // rewrite these requests. urlRewriteRules is the supported Ruffle
+        // mechanism and is applied to requests made by the SWF/loader.
+        for (const host of ['www.inkagames.com', 'inkagames.com', 'www.inkagames.info', 'inkagames.info', 'www.patajuegos.com', 'patajuegos.com']) {
+          const escaped = host.replace(/\./g, '\\.' );
+          packageRewriteRules.push([
+            new RegExp('^https?://' + escaped + '/(.*)$', 'i'),
+            root + host + '/$1'
+          ]);
+        }
+      }
+
       const loadOptions = {
         url: loadUrl,
         ...(packageBase ? { base: packageBase } : {}),
-        ...(flashvars && Object.keys(flashvars).length ? { parameters: flashvars } : {})
+        ...(flashvars && Object.keys(flashvars).length ? { parameters: flashvars } : {}),
+        ...(packageRewriteRules.length ? { urlRewriteRules: packageRewriteRules } : {})
       };
 
       if (typeof api.load === 'function') await api.load(loadOptions);
@@ -503,10 +519,24 @@
     const entries = Object.values(zip.files).filter(entry => !entry.dir);
     if (!entries.length) throw new Error('El ZIP está vacío.');
 
-    const normalized = entries.map(entry => ({
+    let normalized = entries.map(entry => ({
       entry,
       path: entry.name.replace(/\\/g, '/').replace(/^\/+/, '')
     })).filter(x => x.path && !x.path.includes('../'));
+
+    // Flashpoint ZIPs commonly wrap the real web root in a `content/`
+    // directory. That directory is an archive container, not part of the
+    // original URL structure. Remove it so URLs such as
+    // www.inkagames.com/loader/... map to the files inside the package.
+    const hasContentRoot = normalized.length > 0 && normalized.every(x =>
+      x.path === 'content' || x.path.toLowerCase().startsWith('content/')
+    );
+    if (hasContentRoot) {
+      normalized = normalized.map(x => ({
+        ...x,
+        path: x.path.replace(/^content\//i, '')
+      })).filter(x => x.path);
+    }
 
     for (const item of normalized) {
       if (/\.(html?|xhtml)$/i.test(item.path)) {
