@@ -215,6 +215,21 @@
     const base = publicPackageUrl(prefix);
     const domains = ['inkagames.com', 'inkagames.info', 'patajuegos.com', 'uploads.ungrounded.net'];
     const rules = [];
+
+    // Muchos juegos de este motor (Inkagames) llaman a scripts de servidor que
+    // ya no existen (idioma.php, save_terrain_data.php, fast_testing.php...).
+    // Como son .php/.cgi/.asp nunca los vamos a poder subir como archivo estático:
+    // si dejamos que caigan en la reescritura normal, terminan pidiendo un
+    // archivo que no existe en el storage (404) y el juego se queda esperando
+    // esa respuesta para siempre -> pantalla negra tras el 100%.
+    // Por eso van ANTES de las reglas normales y responden al instante con un
+    // cuerpo vacío (data: URI, no toca la red) en vez de esperar un 404.
+    for (const domain of domains) {
+      const esc = domain.replace(/\./g, '\\.');
+      rules.push([new RegExp('^https?:\\/\\/(?:www\\.)?' + esc + '\\/.*\\.(?:php|cgi|asp|aspx)(?:\\?.*)?$', 'i'), 'data:text/plain,']);
+      rules.push([new RegExp('^\\/\\/(?:www\\.)?' + esc + '\\/.*\\.(?:php|cgi|asp|aspx)(?:\\?.*)?$', 'i'), 'data:text/plain,']);
+    }
+
     for (const domain of domains) {
       rules.push([new RegExp('^https?:\\/\\/(?:www\\.)?' + domain.replace(/\./g, '\\.') + '\\/(.*)$', 'i'), base + '/www.' + domain + '/$1']);
     }
