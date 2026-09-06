@@ -134,26 +134,38 @@
 
   function parseFlashVarsFromHtml(htmlText) {
     const vars = {};
-    const m = htmlText.match(/flashvars\s*=\s*["']([^"']*)["']/i);
-    if (m) {
-      for (const part of m[1].split('&')) {
+    const decode = (value) => {
+      try { return decodeURIComponent(String(value).replace(/\+/g, ' ')); }
+      catch (_) { return String(value); }
+    };
+    const addPairs = (raw) => {
+      if (!raw) return;
+      for (const part of String(raw).split(/[&;]/)) {
         const i = part.indexOf('=');
         if (i < 0) continue;
-        const key = decodeURIComponent(part.slice(0, i).replace(/\+/g, ' '));
-        let value = decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' '));
+        const key = decode(part.slice(0, i)).trim();
+        let value = decode(part.slice(i + 1));
+        if (!key) continue;
         if (value === "'+numIsFirefox+'") value = /firefox/i.test(navigator.userAgent) ? '1' : '0';
-        if (key) vars[key] = value;
+        vars[key] = value;
       }
-    }
-    // Also accept common object/embed <param> patterns.
-    for (const m2 of htmlText.matchAll(/<param[^>]+name=["']([^"']+)["'][^>]+value=["']([^"']*)["'][^>]*>/ig)) {
-      const k = m2[1].trim();
-      if (k.toLowerCase() === 'flashvars' && !m) {
-        for (const part of m2[2].split('&')) {
-          const i = part.indexOf('=');
-          if (i > 0) vars[decodeURIComponent(part.slice(0,i))] = decodeURIComponent(part.slice(i+1));
-        }
-      }
+    };
+
+    // Standard HTML attributes / <param>.
+    for (const m of htmlText.matchAll(/(?:flashvars|FlashVars)\s*=\s*["']([^"']*)["']/ig)) addPairs(m[1]);
+    for (const m of htmlText.matchAll(/<param[^>]+name=["']flashvars["'][^>]+value=["']([^"']*)["'][^>]*>/ig)) addPairs(m[1]);
+
+    // JavaScript assignments commonly found in archived Inkagames pages.
+    const jsPatterns = [
+      /(?:flashvars|FlashVars)\s*[:=]\s*["']([^"']*)["']/g,
+      /(?:vars|params|parameters)\s*[:=]\s*["']([^"']*(?:NombreSWF|nameSWF|SWF)[^"']*)["']/gi,
+    ];
+    for (const re of jsPatterns) for (const m of htmlText.matchAll(re)) addPairs(m[1]);
+
+    // Some archives keep the values in an encoded query string.
+    for (const m of htmlText.matchAll(/(?:\?|&)([A-Za-z_][\w]*)=([^&"'\s<>]+)/g)) {
+      const k = decode(m[1]).trim();
+      if (/^(NombreSWF|nameSWF|SWF|swf|movie|path|game|gameName|loader)$/i.test(k)) vars[k] = decode(m[2]);
     }
     return vars;
   }
@@ -201,14 +213,16 @@
 
   function makeRuffleRewriteRules(prefix) {
     const base = publicPackageUrl(prefix);
-    return [
-      [/^https?:\/\/(?:www\.)?inkagames\.com\/(.*)$/i, base + '/www.inkagames.com/$1'],
-      [/^https?:\/\/(?:www\.)?inkagames\.info\/(.*)$/i, base + '/www.inkagames.info/$1'],
-      [/^https?:\/\/(?:www\.)?patajuegos\.com\/(.*)$/i, base + '/www.patajuegos.com/$1'],
-      [/^https?:\/\/(?:www\.)?inkagames\.com\/(.*)$/i, base + '/www.inkagames.com/$1'],
-      [/^https?:\/\/(?:www\.)?inkagames\.info\/(.*)$/i, base + '/www.inkagames.info/$1'],
-      [/^https?:\/\/(?:www\.)?patajuegos\.com\/(.*)$/i, base + '/www.patajuegos.com/$1']
-    ];
+    const domains = ['inkagames.com', 'inkagames.info', 'patajuegos.com', 'uploads.ungrounded.net'];
+    const rules = [];
+    for (const domain of domains) {
+      rules.push([new RegExp('^https?:\\/\\/(?:www\\.)?' + domain.replace(/\./g, '\\.') + '\\/(.*)$', 'i'), base + '/www.' + domain + '/$1']);
+    }
+    // Also catch protocol-relative URLs from archived HTML/SWF code.
+    for (const domain of domains) {
+      rules.push([new RegExp('^\\/\\/(?:www\\.)?' + domain.replace(/\./g, '\\.') + '\\/(.*)$', 'i'), base + '/www.' + domain + '/$1']);
+    }
+    return rules;
   }
 
   function commonRuffleOptions() {
@@ -217,7 +231,9 @@
       allowFullscreen: true,
       allowScriptAccess: true,
       compatibilityRules: true,
-      autoplay: 'auto',
+      autoplay: 'on',
+      playerRuntime: 'flashPlayer',
+      preferredRenderer: 'webgl',
       upgradeToHttps: true,
       quality: 'high',
       scale: 'showAll',
@@ -298,16 +314,41 @@
 
         // The HTML is the original entry point/manifest; the actual Flash execution
         // is performed by Ruffle on the same loader SWF used by that HTML.
+        const rewriteRules = makeRuffleRewriteRules(game.storage_prefix);
         const options = {
           ...common,
           url: loaderUrl,
           base: loaderBase,
           parameters,
-          urlRewriteRules: makeRuffleRewriteRules(game.storage_prefix)
+          urlRewriteRules: rewriteRules
         };
 
         if (typeof api.load === 'function') await api.load(options);
         else await player.load(options);
+
+        // Archived Inkagames loaders can finish their own loading screen while
+        // failing to render the game movie. Keep a safe manual fallback to the
+        // detected main SWF, using the same FlashVars and URL rewriting rules.
+        const fallback = document.createElement('button');
+        fallback.type = 'button';
+        fallback.className = 'ghost player-fallback';
+        fallback.textContent = 'Cargar SWF principal directamente';
+        fallback.onclick = async () => {
+          const mainUrl = publicPackageUrl(game.storage_prefix, game.main_swf_path);
+          const directOptions = { ...common, url: mainUrl, base: publicPackageUrl(game.storage_prefix, dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
+          fallback.disabled = true;
+          fallback.textContent = 'Cargando SWF principal…';
+          try {
+            if (typeof api.load === 'function') await api.load(directOptions);
+            else await player.load(directOptions);
+            fallback.remove();
+          } catch (e) {
+            fallback.disabled = false;
+            fallback.textContent = 'Reintentar SWF principal';
+            console.error(e);
+          }
+        };
+        $('playerModal').querySelector('.player-toolbar')?.prepend(fallback);
 
         // Keep the page's exact HTML available for diagnostics/debugging without
         // executing its legacy <object>/<embed> plugin itself.
