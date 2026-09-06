@@ -211,6 +211,17 @@
     return { flashvars, refs, loader, mainSwf, loaderRef, mainName: mainSwf?.path.split('/').pop() || mainName || '' };
   }
 
+  // Reconstruye la URL "original" (http://www.dominio/...) a partir de la ruta
+  // guardada en el paquete (ej. "www.inkagames.com/loader/x.swf"). Se la
+  // pasamos a Ruffle como identidad del SWF (loaderInfo.url) para que el
+  // candado de dominio anti-piratería del juego la vea como una URL de
+  // Inkagames válida, aunque los bytes reales se descarguen del storage
+  // gracias a las urlRewriteRules. Esto es lo mismo que hace Flashpoint con
+  // su truco de hosts/DNS.
+  function originalPackageUrl(path) {
+    return 'http://' + normalizePackagePath(path);
+  }
+
   function makeRuffleRewriteRules(prefix) {
     const base = publicPackageUrl(prefix);
     const domains = ['inkagames.com', 'inkagames.info', 'patajuegos.com', 'uploads.ungrounded.net'];
@@ -323,8 +334,12 @@
         const mainName = game.main_swf_path ? game.main_swf_path.split('/').pop() : (flashvars.NombreSWF || flashvars.nameSWF || '');
         if (!mainName) throw new Error('No hay SWF principal configurado para este paquete.');
 
-        const loaderUrl = publicPackageUrl(game.storage_prefix, game.loader_path);
-        const loaderBase = publicPackageUrl(game.storage_prefix, dirname(game.loader_path));
+        // OJO: usamos la URL ORIGINAL (dominio de Inkagames), no la de Supabase,
+        // como "url"/"base" que ve Ruffle. Así el juego cree que sigue en su
+        // dominio de siempre (pasa el candado anti-piratería) mientras
+        // urlRewriteRules redirige la descarga real hacia el storage.
+        const loaderUrl = originalPackageUrl(game.loader_path);
+        const loaderBase = originalPackageUrl(dirname(game.loader_path));
         const parameters = { ...flashvars, NombreSWF: mainName };
 
         // The HTML is the original entry point/manifest; the actual Flash execution
@@ -349,8 +364,8 @@
         fallback.className = 'ghost player-fallback';
         fallback.textContent = 'Cargar SWF principal directamente';
         fallback.onclick = async () => {
-          const mainUrl = publicPackageUrl(game.storage_prefix, game.main_swf_path);
-          const directOptions = { ...common, url: mainUrl, base: publicPackageUrl(game.storage_prefix, dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
+          const mainUrl = originalPackageUrl(game.main_swf_path);
+          const directOptions = { ...common, url: mainUrl, base: originalPackageUrl(dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
           fallback.disabled = true;
           fallback.textContent = 'Cargando SWF principal…';
           try {
