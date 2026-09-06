@@ -267,7 +267,8 @@
       wmode: 'opaque',
       splashScreen: false,
       showSwfDownload: false,
-      contextMenu: true,
+      contextMenu: 'on',
+      logLevel: 'debug',
     };
   }
 
