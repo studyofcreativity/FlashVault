@@ -1,12 +1,11 @@
 (() => {
-  // FlashVault compatibility layer for old Flash games.
-  // Some legacy Inkagames-era SWFs request check_server.txt from old domains
-  // that no longer resolve or do not allow browser CORS requests. Ruffle uses
-  // the page's fetch API for these requests, so we provide a harmless local
-  // 200 response for that server-check resource instead of letting it crash
-  // the movie's loading flow.
+  // FlashVault compatibility layer for old Inkagames-era SWFs.
+  // IMPORTANT: only intercept requests to the ORIGINAL game domains.
+  // Never intercept Supabase Storage URLs, even if a stored path happens to
+  // contain "juego_swf/check_server.txt".
   const nativeFetch = window.fetch.bind(window);
-  const CHECK_SERVER_RE = /\/juego_swf\/check_server\.txt(?:\?|$)/i;
+  const LEGACY_HOST_RE = /^(?:www\.)?(?:inkagames\.info|inkagames\.com|patajuegos\.com)$/i;
+  const CHECK_SERVER_PATH_RE = /^\/juego_swf\/check_server\.txt(?:\?|$)/i;
 
   window.fetch = async function flashVaultFetch(input, init) {
     let url = '';
@@ -14,30 +13,29 @@
       url = typeof input === 'string' ? input : (input && input.url) || '';
     } catch (_) {}
 
-    if (CHECK_SERVER_RE.test(url)) {
-      const response = new Response('OK\n', {
+    let parsed = null;
+    try { parsed = new URL(url, window.location.href); } catch (_) {}
+
+    // Only fake check_server.txt when the SWF is actually requesting it from
+    // an original Inkagames/Patajuegos domain. This prevents the patch from
+    // hijacking Supabase uploads of a file with the same path/name.
+    if (parsed && LEGACY_HOST_RE.test(parsed.hostname) && CHECK_SERVER_PATH_RE.test(parsed.pathname + parsed.search)) {
+      return new Response('OK\n', {
         status: 200,
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Cache-Control': 'no-store'
         }
       });
-      // Some Ruffle/browser paths call response.json() even though the
-      // original Inkagames check_server.txt is plain text. Keep text()
-      // compatible with the original file, but make json() harmless too.
-      response.json = async () => ({ ok: true, value: 'OK' });
-      return response;
     }
 
-    // A Flashpoint/Inkagames package can contain resources under several
-    // legacy domains. When the package was uploaded to Supabase, rewrite
-    // those absolute requests to the corresponding file inside the package.
+    // For package games, rewrite requests to the original legacy domains to
+    // the matching file preserved inside the uploaded ZIP.
     const root = window.FLASHVAULT_PACKAGE_ROOT;
-    if (root && /^https?:\/\/(?:www\.)?(?:inkagames\.info|inkagames\.com|patajuegos\.com)(?:\/|$)/i.test(url)) {
+    if (parsed && root && LEGACY_HOST_RE.test(parsed.hostname)) {
       try {
-        const u = new URL(url);
         const packageBase = root.endsWith('/') ? root : root + '/';
-        const rewritten = packageBase + u.hostname + u.pathname.replace(/^\/+/, '') + u.search;
+        const rewritten = packageBase + parsed.hostname + parsed.pathname.replace(/^\/+/, '') + parsed.search;
         return nativeFetch(rewritten, init);
       } catch (_) {}
     }
@@ -46,7 +44,7 @@
   };
 
   window.FLASHVAULT_RUFFLE_COMPAT = {
-    version: '1.0',
+    version: '1.1',
     checkServerPatched: true
   };
 })();
