@@ -8,10 +8,14 @@ create table if not exists public.games (
   owner_id uuid not null references auth.users(id) on delete cascade,
   title text not null check (char_length(title) between 1 and 80),
   description text not null default '',
-  swf_url text not null,
+  swf_url text,
+  game_type text not null default 'single_swf' check (game_type in ('single_swf','multi_resource')),
+  storage_prefix text,
+  main_html_path text,
+  loader_path text,
+  main_swf_path text,
+  flashvars jsonb,
   cover_url text not null,
-  game_type text not null default 'single' check (game_type in ('single','package')),
-  package_path text,
   published boolean not null default true,
   created_at timestamptz not null default now()
 );
@@ -51,12 +55,7 @@ create policy "Admin can delete games"
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values
   ('flash-covers', 'flash-covers', true, 10485760, array['image/png','image/jpeg','image/webp']),
-  ('flash-games', 'flash-games', true, 104857600, array[
-    'application/x-shockwave-flash','application/octet-stream',
-    'image/png','image/jpeg','image/webp','image/gif','image/svg+xml',
-    'audio/mpeg','audio/wav','audio/ogg','video/mp4','video/webm',
-    'application/xml','application/json','text/plain','text/css','text/javascript','text/html'
-  ])
+  ('flash-games', 'flash-games', true, 104857600, null)
 on conflict (id) do update set public = excluded.public, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
 
 -- Portadas: cualquiera puede leer.

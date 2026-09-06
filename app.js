@@ -16,6 +16,7 @@
   let activeRuffleApi = null;
   let activeGameId = null;
   let activeGameTitle = '';
+  let fullscreenCleanup = null;
   let adminSessionUnlocked = false;
   let currentAdminUserId = null;
 
@@ -32,6 +33,7 @@
 
   async function stopActiveGame() {
     try {
+      if (fullscreenCleanup) { try { fullscreenCleanup(); } catch (_) {} fullscreenCleanup = null; }
       if (activeRuffleApi) {
         try { activeRuffleApi.exitFullscreen?.(); } catch (_) {}
         try { activeRuffleApi.suspend?.(); } catch (_) {}
@@ -40,7 +42,7 @@
       if (activePlayer) {
         try { activePlayer.pause?.(); } catch (_) {}
         try { activePlayer.volume = 0; } catch (_) {}
-        activePlayer.remove();
+        try { activePlayer.remove(); } catch (_) {}
       }
     } finally {
       activePlayer = null;
@@ -111,21 +113,154 @@
     return user || null;
   }
 
-  function decodeLaunchFragment(value) {
-    const raw = String(value || '');
-    const marker = '#flashvault-flashvars=';
-    const idx = raw.indexOf(marker);
-    if (idx < 0) return { url: raw, parameters: null };
-    const url = raw.slice(0, idx);
-    try {
-      const encoded = raw.slice(idx + marker.length);
-      const bin = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
-      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
-      const json = new TextDecoder().decode(bytes);
-      return { url, parameters: JSON.parse(json) };
-    } catch (_) {
-      return { url, parameters: null };
+  function encodePath(path) {
+    return String(path || '').split('/').map(encodeURIComponent).join('/');
+  }
+
+  function normalizePackagePath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/^content\//i, '');
+  }
+
+  function publicPackageUrl(prefix, path = '') {
+    const base = String(cfg.SUPABASE_URL).replace(/\/$/, '') + '/storage/v1/object/public/flash-games/';
+    return base + encodePath(prefix) + (path ? '/' + encodePath(normalizePackagePath(path)) : '');
+  }
+
+  function dirname(path) {
+    const p = normalizePackagePath(path);
+    const i = p.lastIndexOf('/');
+    return i >= 0 ? p.slice(0, i + 1) : '';
+  }
+
+  function parseFlashVarsFromHtml(htmlText) {
+    const vars = {};
+    const m = htmlText.match(/flashvars\s*=\s*["']([^"']*)["']/i);
+    if (m) {
+      for (const part of m[1].split('&')) {
+        const i = part.indexOf('=');
+        if (i < 0) continue;
+        const key = decodeURIComponent(part.slice(0, i).replace(/\+/g, ' '));
+        let value = decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' '));
+        if (value === "'+numIsFirefox+'") value = /firefox/i.test(navigator.userAgent) ? '1' : '0';
+        if (key) vars[key] = value;
+      }
     }
+    // Also accept common object/embed <param> patterns.
+    for (const m2 of htmlText.matchAll(/<param[^>]+name=["']([^"']+)["'][^>]+value=["']([^"']*)["'][^>]*>/ig)) {
+      const k = m2[1].trim();
+      if (k.toLowerCase() === 'flashvars' && !m) {
+        for (const part of m2[2].split('&')) {
+          const i = part.indexOf('=');
+          if (i > 0) vars[decodeURIComponent(part.slice(0,i))] = decodeURIComponent(part.slice(i+1));
+        }
+      }
+    }
+    return vars;
+  }
+
+  function findSwfRefs(htmlText) {
+    const refs = [];
+    for (const m of htmlText.matchAll(/(?:src|movie|value|data)\s*=\s*["']([^"']+\.swf(?:\?[^"']*)?)["']/ig)) refs.push(m[1]);
+    for (const m of htmlText.matchAll(/https?:[^\s"']+\.swf(?:\?[^\s"']*)?/ig)) refs.push(m[0]);
+    return [...new Set(refs)];
+  }
+
+  function packageEntryMatch(entries, ref) {
+    if (!ref) return null;
+    const clean = normalizePackagePath(String(ref).split('?')[0]);
+    const low = clean.toLowerCase();
+    return entries.find(e => e.path.toLowerCase() === low)
+      || entries.find(e => e.path.toLowerCase().endsWith('/' + low))
+      || null;
+  }
+
+  function chooseMainHtml(entries) {
+    const ink = entries.filter(e => /\.html?$/i.test(e.path) && /(^|\/)www\.inkagames\.(com|info)\//i.test(e.path));
+    const all = entries.filter(e => /\.html?$/i.test(e.path));
+    return [...(ink.length ? ink : all)].sort((a,b) => b.size - a.size)[0] || null;
+  }
+
+  function analyzePackageEntries(entries, htmlText) {
+    const flashvars = parseFlashVarsFromHtml(htmlText);
+    const refs = findSwfRefs(htmlText);
+    const loaderRef = refs.find(r => /(?:loader\/|load[_-]?game|loader).*\.swf/i.test(r)) || 'loader/load_game_ink_v2.swf';
+    let loader = packageEntryMatch(entries, loaderRef);
+    if (!loader) loader = entries.find(e => /(^|\/)loader\/.*\.swf$/i.test(e.path)) || entries.find(e => /load[_-]?game.*\.swf$/i.test(e.path));
+
+    const mainName = flashvars.NombreSWF || flashvars.nameSWF || flashvars.SWF || flashvars.swf || flashvars.movie || '';
+    let mainSwf = packageEntryMatch(entries, mainName);
+    if (!mainSwf) {
+      const swfs = entries.filter(e => /\.swf$/i.test(e.path) && (!loader || e.path !== loader.path));
+      // Prefer an SWF referenced by the HTML, then the largest remaining SWF.
+      mainSwf = swfs.find(e => refs.some(r => normalizePackagePath(r).toLowerCase().endsWith('/' + e.path.toLowerCase()) || normalizePackagePath(r).toLowerCase() === e.path.toLowerCase()))
+        || [...swfs].sort((a,b) => b.size - a.size)[0] || null;
+    }
+
+    return { flashvars, refs, loader, mainSwf, loaderRef, mainName: mainSwf?.path.split('/').pop() || mainName || '' };
+  }
+
+  function makeRuffleRewriteRules(prefix) {
+    const base = publicPackageUrl(prefix);
+    return [
+      [/^https?:\/\/(?:www\.)?inkagames\.com\/(.*)$/i, base + '/www.inkagames.com/$1'],
+      [/^https?:\/\/(?:www\.)?inkagames\.info\/(.*)$/i, base + '/www.inkagames.info/$1'],
+      [/^https?:\/\/(?:www\.)?patajuegos\.com\/(.*)$/i, base + '/www.patajuegos.com/$1'],
+      [/^https?:\/\/(?:www\.)?inkagames\.com\/(.*)$/i, base + '/www.inkagames.com/$1'],
+      [/^https?:\/\/(?:www\.)?inkagames\.info\/(.*)$/i, base + '/www.inkagames.info/$1'],
+      [/^https?:\/\/(?:www\.)?patajuegos\.com\/(.*)$/i, base + '/www.patajuegos.com/$1']
+    ];
+  }
+
+  function commonRuffleOptions() {
+    return {
+      allowNetworking: 'all',
+      allowFullscreen: true,
+      allowScriptAccess: true,
+      compatibilityRules: true,
+      autoplay: 'auto',
+      upgradeToHttps: true,
+      quality: 'high',
+      scale: 'showAll',
+      forceScale: false,
+      wmode: 'opaque',
+      splashScreen: false,
+      showSwfDownload: false,
+      contextMenu: true,
+    };
+  }
+
+  function installFullscreenButton(api, player) {
+    const btn = $('fullscreenBtn');
+    btn.disabled = false;
+    const enter = () => {
+      try {
+        if (typeof api.requestFullscreen === 'function') return api.requestFullscreen();
+        if (typeof player.enterFullscreen === 'function') return player.enterFullscreen();
+      } catch (err) {
+        $('playerError').textContent = 'No se pudo activar pantalla completa: ' + (err.message || err);
+        $('playerError').classList.remove('hidden');
+      }
+    };
+    btn.onclick = enter;
+    const sync = () => {
+      let fs = false;
+      try { fs = !!api.isFullscreen; } catch (_) {}
+      btn.textContent = fs ? '⛶ Salir de pantalla completa' : '⛶ Pantalla completa';
+    };
+    document.addEventListener('fullscreenchange', sync);
+    fullscreenCleanup = () => document.removeEventListener('fullscreenchange', sync);
+    sync();
+  }
+
+  async function createPlayer() {
+    if (!window.RufflePlayer) throw new Error('Ruffle todavía no está listo. Recarga la página e inténtalo otra vez.');
+    const factory = window.RufflePlayer.newest();
+    const player = factory.createPlayer();
+    activePlayer = player;
+    $('ruffleHost').appendChild(player);
+    const api = typeof player.ruffle === 'function' ? player.ruffle() : player;
+    activeRuffleApi = api;
+    return { player, api };
   }
 
   async function playGame(id) {
@@ -142,118 +277,80 @@
     openModal('playerModal');
 
     try {
-      if (!window.RufflePlayer) {
-        throw new Error('Ruffle todavía no está listo. Recarga la página e inténtalo otra vez.');
-      }
+      const { player, api } = await createPlayer();
+      installFullscreenButton(api, player);
+      const common = commonRuffleOptions();
 
-      const factory = window.RufflePlayer.newest();
-      const player = factory.createPlayer();
-      activePlayer = player;
+      if (game.game_type === 'multi_resource' && game.storage_prefix && game.main_html_path && game.loader_path) {
+        const htmlUrl = publicPackageUrl(game.storage_prefix, game.main_html_path);
+        const htmlResp = await fetch(htmlUrl, { cache: 'no-store' });
+        if (!htmlResp.ok) throw new Error('No se pudo leer el HTML principal del paquete (' + htmlResp.status + ').');
+        const htmlText = await htmlResp.text();
 
-      $('ruffleHost').appendChild(player);
+        const entries = []; // DB metadata is enough; no need to download the entire ZIP again.
+        const flashvars = game.flashvars && typeof game.flashvars === 'object' ? game.flashvars : {};
+        const mainName = game.main_swf_path ? game.main_swf_path.split('/').pop() : (flashvars.NombreSWF || flashvars.nameSWF || '');
+        if (!mainName) throw new Error('No hay SWF principal configurado para este paquete.');
 
-      const api = typeof player.ruffle === 'function' ? player.ruffle() : player;
-      activeRuffleApi = api;
+        const loaderUrl = publicPackageUrl(game.storage_prefix, game.loader_path);
+        const loaderBase = publicPackageUrl(game.storage_prefix, dirname(game.loader_path));
+        const parameters = { ...flashvars, NombreSWF: mainName };
 
-      player.config = {
-        allowNetworking: 'all',
-        allowFullscreen: true,
-        allowScriptAccess: true,
-        compatibilityRules: true,
-        autoplay: 'auto',
-        upgradeToHttps: true,
-        quality: 'high',
-        scale: 'showAll',
-        wmode: 'opaque',
-        splashScreen: false,
-        showSwfDownload: false,
-        contextMenu: true
-      };
-
-      const fullscreenButton = $('fullscreenBtn');
-      fullscreenButton.disabled = false;
-      fullscreenButton.onclick = () => {
-        try {
-          if (typeof api.requestFullscreen === 'function') api.requestFullscreen();
-          else if (typeof player.enterFullscreen === 'function') player.enterFullscreen();
-        } catch (err) {
-          $('playerError').textContent = 'No se pudo activar pantalla completa: ' + (err.message || err);
-          $('playerError').classList.remove('hidden');
-        }
-      };
-
-      if (typeof api.setFullscreen === 'function' || typeof api.requestFullscreen === 'function') {
-        const onFullscreenChange = () => {
-          fullscreenButton.textContent = api.isFullscreen ? '⛶ Salir de pantalla completa' : '⛶ Pantalla completa';
+        // The HTML is the original entry point/manifest; the actual Flash execution
+        // is performed by Ruffle on the same loader SWF used by that HTML.
+        const options = {
+          ...common,
+          url: loaderUrl,
+          base: loaderBase,
+          parameters,
+          urlRewriteRules: makeRuffleRewriteRules(game.storage_prefix)
         };
-        document.addEventListener('fullscreenchange', onFullscreenChange);
-        player.__flashVaultFullscreenCleanup = () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-      }
 
-      // Multi-resource packages can contain an HTML wrapper/loader. For old
-      // Inkagames games, loading the largest SWF directly is NOT enough: the
-      // loader receives FlashVars and then loads the real game SWF.
-      let loadUrl = game.swf_url;
-      let flashvars = undefined;
-      let packageBase = null;
+        if (typeof api.load === 'function') await api.load(options);
+        else await player.load(options);
 
-      if (game.game_type === 'package' && game.package_path) {
-        const packageRoot = sb.storage.from('flash-games').getPublicUrl(game.package_path).data.publicUrl;
-        window.FLASHVAULT_PACKAGE_ROOT = packageRoot.endsWith('/') ? packageRoot : packageRoot + '/';
-
-        const decoded = decodeLaunchFragment(loadUrl);
-        loadUrl = decoded.url;
-        flashvars = decoded.parameters;
-
-        // swf_url points at the package entry SWF. Its directory is the base
-        // for relative requests made by the entry/loader SWF.
-        try {
-          const u = new URL(loadUrl);
-          packageBase = u.href.substring(0, u.href.lastIndexOf('/') + 1);
-          player.config = { ...player.config, base: packageBase };
-        } catch (_) {}
+        // Keep the page's exact HTML available for diagnostics/debugging without
+        // executing its legacy <object>/<embed> plugin itself.
+        player.setAttribute('data-flashvault-entry-html', htmlUrl);
+      } else if (game.swf_url) {
+        const options = { ...common, url: game.swf_url };
+        if (typeof api.load === 'function') await api.load(options);
+        else await player.load(options);
       } else {
-        window.FLASHVAULT_PACKAGE_ROOT = null;
+        throw new Error('Este juego no tiene una fuente reproducible.');
       }
-
-      const packageRewriteRules = [];
-      if (game.game_type === 'package' && game.package_path) {
-        const root = window.FLASHVAULT_PACKAGE_ROOT;
-        // Ruffle performs SWF networking internally, so window.fetch cannot
-        // rewrite these requests. urlRewriteRules is the supported Ruffle
-        // mechanism and is applied to requests made by the SWF/loader.
-        for (const host of ['www.inkagames.com', 'inkagames.com', 'www.inkagames.info', 'inkagames.info', 'www.patajuegos.com', 'patajuegos.com']) {
-          const escaped = host.replace(/\./g, '\\.' );
-          packageRewriteRules.push([
-            new RegExp('^https?://' + escaped + '/(.*)$', 'i'),
-            root + host + '/$1'
-          ]);
-        }
-      }
-
-      const loadOptions = {
-        url: loadUrl,
-        ...(packageBase ? { base: packageBase } : {}),
-        ...(flashvars && Object.keys(flashvars).length ? { parameters: flashvars } : {}),
-        ...(packageRewriteRules.length ? { urlRewriteRules: packageRewriteRules } : {})
-      };
-
-      if (typeof api.load === 'function') await api.load(loadOptions);
-      else await player.load(loadOptions);
-
     } catch (err) {
+      console.error(err);
       $('playerError').textContent = err.message || 'No se pudo iniciar el juego.';
       $('playerError').classList.remove('hidden');
     }
   }
 
-  $('fullscreenBtn').addEventListener('click', () => {
-    if (!activeRuffleApi) return;
-    try {
-      if (typeof activeRuffleApi.requestFullscreen === 'function') activeRuffleApi.requestFullscreen();
-      else activePlayer?.enterFullscreen?.();
-    } catch (_) {}
-  });
+  async function loadGames() {
+    let result = await sb.from('games')
+      .select('id,title,description,swf_url,cover_url,owner_id,created_at,game_type,storage_prefix,main_html_path,loader_path,main_swf_path,flashvars')
+      .eq('published', true)
+      .order('created_at', { ascending: false });
+
+    // Backwards compatibility: if the database hasn't received the migration,
+    // fall back to the original schema so old games keep loading.
+    if (result.error && /column .* does not exist/i.test(result.error.message || '')) {
+      result = await sb.from('games')
+        .select('id,title,description,swf_url,cover_url,owner_id,created_at')
+        .eq('published', true)
+        .order('created_at', { ascending: false });
+    }
+
+    const { data, error } = result;
+    if (error) {
+      status.textContent = 'No se pudo cargar la biblioteca: ' + error.message;
+      return;
+    }
+
+    games = (data || []).map(g => ({ ...g, game_type: g.game_type || 'single_swf' }));
+    status.textContent = `${games.length} juego${games.length === 1 ? '' : 's'} publicado${games.length === 1 ? '' : 's'}.`;
+    render(games);
+  }
 
   function render(list) {
     if (!list.length) {
@@ -277,45 +374,8 @@
         </article>`;
     }).join('');
 
-    gamesGrid.querySelectorAll('[data-play]').forEach(btn => {
-      btn.addEventListener('click', () => playGame(btn.dataset.play));
-    });
-
-    gamesGrid.querySelectorAll('[data-delete]').forEach(btn => {
-      btn.addEventListener('click', () => deleteGame(btn.dataset.delete));
-    });
-  }
-
-  async function loadGames() {
-    // Intentamos primero el esquema nuevo. Si la migración aún no se ejecutó,
-    // usamos automáticamente el esquema antiguo para que la biblioteca siga funcionando.
-    let result = await sb
-      .from('games')
-      .select('id,title,description,swf_url,cover_url,owner_id,created_at,game_type,package_path')
-      .eq('published', true)
-      .order('created_at', { ascending: false });
-
-    let data = result.data;
-    let error = result.error;
-
-    if (error && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
-      result = await sb
-        .from('games')
-        .select('id,title,description,swf_url,cover_url,owner_id,created_at')
-        .eq('published', true)
-        .order('created_at', { ascending: false });
-      data = (result.data || []).map(g => ({ ...g, game_type: 'single', package_path: null }));
-      error = result.error;
-    }
-
-    if (error) {
-      status.textContent = 'No se pudo cargar la biblioteca: ' + error.message;
-      return;
-    }
-
-    games = data || [];
-    status.textContent = `${games.length} juego${games.length === 1 ? '' : 's'} publicado${games.length === 1 ? '' : 's'}.`;
-    render(games);
+    gamesGrid.querySelectorAll('[data-play]').forEach(btn => btn.addEventListener('click', () => playGame(btn.dataset.play)));
+    gamesGrid.querySelectorAll('[data-delete]').forEach(btn => btn.addEventListener('click', () => deleteGame(btn.dataset.delete)));
   }
 
   async function deleteGame(id) {
@@ -327,13 +387,11 @@
       alert('No tienes permiso para eliminar este juego.');
       return;
     }
-
     if (!confirm(`¿Eliminar "${game.title}" de FlashVault?`)) return;
 
     try {
       const { error } = await sb.from('games').delete().eq('id', game.id).eq('owner_id', user.id);
       if (error) throw error;
-
       if (activeGameId === game.id) await closePlayerModal();
       await loadGames();
     } catch (err) {
@@ -354,49 +412,34 @@
     if (user && isConfiguredAdmin(user)) {
       $('adminLoginView').classList.add('hidden');
       $('adminPublishView').classList.remove('hidden');
-      if (!$('publishForm').classList.contains('hidden')) { /* conservar selección si ya está editando */ } else { showUploadTypeChooser(); }
       $('signedInAs').textContent = `Sesión iniciada como ${user.email || user.id}`;
-      $('diagnosticsStatus').textContent = '🔒 Acceso administrativo activo.';
+      $('diagnosticsStatus').textContent = '🔒 Diagnóstico privado activo para esta cuenta.';
     } else {
       $('adminLoginView').classList.remove('hidden');
       $('adminPublishView').classList.add('hidden');
       $('diagnosticsStatus').textContent = '';
       currentAdminUserId = null;
     }
-
     render(games);
   }
 
   $('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     $('loginMessage').textContent = 'Entrando…';
-
     if (cfg.EXTRA_ADMIN_KEY && $('extraKey').value !== cfg.EXTRA_ADMIN_KEY) {
       clearAdminUnlocked();
       $('loginMessage').textContent = 'La clave extra no coincide.';
       return;
     }
-
-    const { data, error } = await sb.auth.signInWithPassword({
-      email: $('email').value.trim(),
-      password: $('password').value
-    });
-
-    if (error) {
-      clearAdminUnlocked();
-      $('loginMessage').textContent = error.message;
-      return;
-    }
-
+    const { data, error } = await sb.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+    if (error) { clearAdminUnlocked(); $('loginMessage').textContent = error.message; return; }
     markAdminUnlocked();
-
     if (!isConfiguredAdmin(data.user)) {
       clearAdminUnlocked();
       await sb.auth.signOut();
       $('loginMessage').textContent = 'La cuenta inició sesión, pero no está autorizada para FlashVault.';
       return;
     }
-
     $('loginMessage').textContent = 'Listo.';
     await refreshAdmin();
   });
@@ -407,256 +450,135 @@
     await refreshAdmin();
   };
 
-  async function uploadFile(bucket, path, file, contentType) {
+  function safeName(text) {
+    return text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,50) || 'juego';
+  }
+  function ext(name) {
+    const p = name.split('.');
+    return p.length > 1 ? p.pop().toLowerCase() : 'jpg';
+  }
+
+  async function uploadFile(bucket, path, file, contentType, options = {}) {
     const { error } = await sb.storage.from(bucket).upload(path, file, {
-      cacheControl: '31536000', upsert: false, contentType
+      cacheControl: '31536000', upsert: options.upsert ?? false, contentType
     });
     if (error) throw error;
     return sb.storage.from(bucket).getPublicUrl(path).data.publicUrl;
   }
 
-  let selectedUploadType = null;
-
-  function showUploadTypeChooser() {
-    selectedUploadType = null;
-    $('uploadTypeChooser').classList.remove('hidden');
-    $('publishForm').classList.add('hidden');
-    $('publishForm').reset();
-    $('publishMessage').textContent = '';
+  function getUploadType() {
+    return document.querySelector('input[name="flashUploadType"]:checked')?.value || 'single';
   }
 
-  function selectUploadType(type) {
-    selectedUploadType = type;
-    $('uploadTypeChooser').classList.add('hidden');
-    $('publishForm').classList.remove('hidden');
-    $('singleSwfField').classList.toggle('hidden', type !== 'single');
-    $('packageZipField').classList.toggle('hidden', type !== 'package');
-    $('packageHint').classList.toggle('hidden', type !== 'package');
+  function syncUploadType() {
+    const type = getUploadType();
+    $('singleUploadPanel').classList.toggle('hidden', type !== 'single');
+    $('multiUploadPanel').classList.toggle('hidden', type !== 'multi');
+    $('gameTitle').required = type === 'single';
+    $('coverFile').required = type === 'single';
     $('swfFile').required = type === 'single';
-    $('packageFile').required = type === 'package';
-    $('selectedUploadType').textContent = type === 'single'
-      ? '◈ Juego Flash de un solo archivo'
-      : '▦ Juego Flash con múltiples recursos';
-    $('publishMessage').textContent = '';
+    $('multiGameTitle').required = type === 'multi';
+    $('multiCoverFile').required = type === 'multi';
+    $('packageFile').required = type === 'multi';
   }
-
-  document.querySelectorAll('[data-upload-type]').forEach(btn => {
-    btn.addEventListener('click', () => selectUploadType(btn.dataset.uploadType));
-  });
-  $('changeUploadType').addEventListener('click', showUploadTypeChooser);
-
-  function encodeLaunchFragment(parameters) {
-    const json = JSON.stringify(parameters || {});
-    const bytes = new TextEncoder().encode(json);
-    let bin = '';
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  }
-
-  function parseFlashVars(value) {
-    const out = {};
-    const text = String(value || '').replace(/&amp;/gi, '&');
-    for (const part of text.split('&')) {
-      if (!part) continue;
-      const i = part.indexOf('=');
-      const key = i >= 0 ? part.slice(0, i) : part;
-      const val = i >= 0 ? part.slice(i + 1) : '';
-      if (key) out[key] = val;
-    }
-    return out;
-  }
-
-  function resolvePackagePath(htmlPath, src) {
-    try {
-      const clean = String(src || '').split('#')[0].split('?')[0];
-      const u = new URL(clean, 'https://package.local/' + htmlPath);
-      if (u.hostname !== 'package.local') {
-        const path = u.pathname.replace(/^\/+/, '');
-        return `${u.hostname}/${path}`.replace(/\/+$/, '');
-      }
-      return u.pathname.replace(/^\/+/, '');
-    } catch (_) {
-      return String(src || '').replace(/^\/+/, '');
-    }
-  }
-
-  function findPackageEntry(normalized) {
-    const byPath = new Map(normalized.map(x => [x.path.toLowerCase(), x.path]));
-    const htmlCandidates = normalized.filter(x => /\.(html?|xhtml)$/i.test(x.path));
-
-    // Prefer an HTML wrapper that explicitly embeds a SWF and provides FlashVars.
-    for (const item of htmlCandidates) {
-      const html = item.text || '';
-      const srcMatch = html.match(/(?:src|data)\s*=\s*["']([^"']+\.swf(?:\?[^"']*)?)["']/i);
-      if (!srcMatch) continue;
-      const swfPath = resolvePackagePath(item.path, srcMatch[1]);
-      const actual = byPath.get(swfPath.toLowerCase());
-      if (!actual) continue;
-      const fvMatch = html.match(/flashvars\s*=\s*["']([^"']*)["']/i);
-      const params = parseFlashVars(fvMatch ? fvMatch[1] : '');
-      return { path: actual, parameters: params, wrapper: item.path };
-    }
-
-    // Otherwise prefer a likely game SWF, not a loader/preloader.
-    const swfs = normalized.filter(x => x.path.toLowerCase().endsWith('.swf'));
-    if (!swfs.length) return null;
-    const main = [...swfs].sort((a, b) => {
-      const score = (x) => {
-        const n = x.path.toLowerCase().split('/').pop();
-        let v = 0;
-        if (/^(game|main|index|play|start)[-_ ]?/.test(n)) v += 100;
-        if (/loader|preloader|loading/.test(n)) v -= 80;
-        return v;
-      };
-      return score(b) - score(a);
-    })[0];
-    return { path: main.path, parameters: null, wrapper: null };
-  }
-
-  async function uploadPackage(slug, zipFile) {
-    if (!window.JSZip) throw new Error('No se pudo cargar el lector ZIP. Recarga la página e inténtalo de nuevo.');
-    const zip = await JSZip.loadAsync(zipFile);
-    const entries = Object.values(zip.files).filter(entry => !entry.dir);
-    if (!entries.length) throw new Error('El ZIP está vacío.');
-
-    let normalized = entries.map(entry => ({
-      entry,
-      path: entry.name.replace(/\\/g, '/').replace(/^\/+/, '')
-    })).filter(x => x.path && !x.path.includes('../'));
-
-    // Flashpoint ZIPs commonly wrap the real web root in a `content/`
-    // directory. That directory is an archive container, not part of the
-    // original URL structure. Remove it so URLs such as
-    // www.inkagames.com/loader/... map to the files inside the package.
-    const hasContentRoot = normalized.length > 0 && normalized.every(x =>
-      x.path === 'content' || x.path.toLowerCase().startsWith('content/')
-    );
-    if (hasContentRoot) {
-      normalized = normalized.map(x => ({
-        ...x,
-        path: x.path.replace(/^content\//i, '')
-      })).filter(x => x.path);
-    }
-
-    for (const item of normalized) {
-      if (/\.(html?|xhtml)$/i.test(item.path)) {
-        try { item.text = await item.entry.async('text'); } catch (_) { item.text = ''; }
-      }
-    }
-
-    const swfs = normalized.filter(x => x.path.toLowerCase().endsWith('.swf'));
-    if (!swfs.length) throw new Error('El ZIP no contiene ningún archivo .swf.');
-    const entry = findPackageEntry(normalized);
-    if (!entry) throw new Error('No se pudo determinar el SWF de entrada.');
-
-    const root = `${slug}/`;
-    let mainUrl = null;
-    let uploaded = 0;
-
-    for (const item of normalized) {
-      const blob = await item.entry.async('blob');
-      const contentType = guessContentType(item.path);
-      const storagePath = `${root}${item.path}`;
-      await uploadFile('flash-games', storagePath, blob, contentType);
-      uploaded++;
-      if (item.path === entry.path) {
-        mainUrl = sb.storage.from('flash-games').getPublicUrl(storagePath).data.publicUrl;
-      }
-    }
-
-    if (!mainUrl) throw new Error('No se pudo obtener la URL del SWF de entrada.');
-    if (entry.parameters && Object.keys(entry.parameters).length) {
-      mainUrl += `#flashvault-flashvars=${encodeLaunchFragment(entry.parameters)}`;
-    }
-    return { mainUrl, packagePath: root, fileCount: uploaded, mainPath: `${root}${entry.path}`, parameters: entry.parameters, wrapper: entry.wrapper };
-  }
-
-  function guessContentType(path) {
-    const e = ext(path);
-    const map = {
-      swf: 'application/x-shockwave-flash',
-      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
-      mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', webm: 'video/webm',
-      xml: 'application/xml', json: 'application/json', txt: 'text/plain', css: 'text/css', js: 'text/javascript',
-      html: 'text/html', htm: 'text/html', svg: 'image/svg+xml',
-      dat: 'application/octet-stream', bin: 'application/octet-stream'
-    };
-    return map[e] || 'application/octet-stream';
-  }
+  document.querySelectorAll('input[name="flashUploadType"]').forEach(r => r.addEventListener('change', syncUploadType));
+  syncUploadType();
 
   $('publishForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const title = $('gameTitle').value.trim();
-    const description = $('gameDescription').value.trim();
-    const cover = $('coverFile').files[0];
-    const swf = $('swfFile').files[0];
-    const packageFile = $('packageFile').files[0];
-    $('publishMessage').textContent = 'Subiendo…';
+    $('publishMessage').textContent = 'Comprobando…';
 
     try {
       const user = await currentUser();
       if (!user || !isConfiguredAdmin(user)) throw new Error('Tu sesión administrativa no está autorizada.');
-      if (!selectedUploadType) throw new Error('Selecciona primero el tipo de juego.');
+
+      const uploadType = getUploadType();
+      const title = (uploadType === 'single' ? $('gameTitle').value : $('multiGameTitle').value).trim();
+      const description = (uploadType === 'single' ? $('gameDescription').value : $('multiGameDescription').value).trim();
+      const cover = uploadType === 'single' ? $('coverFile').files[0] : $('multiCoverFile').files[0];
+      if (!title) throw new Error('Escribe el nombre del juego.');
       if (!cover || !cover.type.startsWith('image/')) throw new Error('La portada debe ser una imagen.');
 
       const slug = `${crypto.randomUUID()}-${safeName(title)}`;
       const coverUrlValue = await uploadFile('flash-covers', `${slug}.${ext(cover.name)}`, cover, cover.type);
-      let swfUrlValue;
-      let packagePath = null;
-      let gameType = 'single';
 
-      if (selectedUploadType === 'single') {
-        if (!swf || !swf.name.toLowerCase().endsWith('.swf')) throw new Error('El archivo del juego debe ser .swf');
-        swfUrlValue = await uploadFile('flash-games', `${slug}.swf`, swf, 'application/x-shockwave-flash');
-      } else {
-        if (!packageFile || !packageFile.name.toLowerCase().endsWith('.zip')) throw new Error('El paquete debe ser un archivo .zip');
-        gameType = 'package';
-        const result = await uploadPackage(slug, packageFile);
-        swfUrlValue = result.mainUrl;
-        packagePath = result.packagePath;
-        $('publishMessage').textContent = `Subidos ${result.fileCount} recursos. Publicando…`;
-      }
-
-      const newRow = {
-        title, description, cover_url: coverUrlValue, swf_url: swfUrlValue,
-        published: true, owner_id: user.id, game_type: gameType, package_path: packagePath
-      };
-      let { error } = await sb.from('games').insert(newRow);
-
-      // Compatibilidad con bases antiguas: un juego de archivo único puede seguir
-      // publicándose mientras la migración todavía no se haya ejecutado.
-      if (error && gameType === 'single' && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
-        ({ error } = await sb.from('games').insert({
+      if (uploadType === 'single') {
+        const swf = $('swfFile').files[0];
+        if (!swf || !swf.name.toLowerCase().endsWith('.swf')) throw new Error('Selecciona un archivo .swf.');
+        const swfUrlValue = await uploadFile('flash-games', `${slug}.swf`, swf, 'application/x-shockwave-flash');
+        const { error } = await sb.from('games').insert({
           title, description, cover_url: coverUrlValue, swf_url: swfUrlValue,
-          published: true, owner_id: user.id
-        }));
-      }
+          game_type: 'single_swf', published: true, owner_id: user.id
+        });
+        if (error) throw error;
+      } else {
+        if (!window.JSZip) throw new Error('No se pudo cargar el lector de ZIP.');
+        const packageFile = $('packageFile').files[0];
+        if (!packageFile || !packageFile.name.toLowerCase().endsWith('.zip')) throw new Error('Selecciona un archivo .zip.');
 
-      if (error) {
-        if (gameType === 'package' && /game_type|package_path|column .* does not exist/i.test(error.message || '')) {
-          throw new Error('Tu Supabase todavía usa el esquema antiguo. Ejecuta supabase-migration-multi-resource.sql en SQL Editor y vuelve a intentarlo.');
+        $('publishMessage').textContent = 'Leyendo ZIP…';
+        const zip = await JSZip.loadAsync(packageFile);
+        const entries = [];
+        for (const raw of Object.keys(zip.files)) {
+          const item = zip.files[raw];
+          if (item.dir) continue;
+          const path = normalizePackagePath(raw);
+          if (!path) continue;
+          const blob = await item.async('blob');
+          entries.push({ path, size: blob.size, blob });
         }
-        throw error;
+        if (!entries.length) throw new Error('El ZIP está vacío.');
+
+        const mainHtml = chooseMainHtml(entries);
+        if (!mainHtml) throw new Error('No se encontró un HTML de Inkagames en el ZIP.');
+        const htmlText = await mainHtml.blob.text();
+        const analysis = analyzePackageEntries(entries, htmlText);
+        if (!analysis.loader) throw new Error('No se encontró el loader SWF del juego.');
+        if (!analysis.mainSwf) throw new Error('No se encontró el SWF principal del juego.');
+
+        const prefix = `${slug}/`;
+        let done = 0;
+        for (const entry of entries) {
+          const lower = entry.path.toLowerCase();
+          const mime = lower.endsWith('.swf') ? 'application/x-shockwave-flash'
+            : lower.endsWith('.html') || lower.endsWith('.htm') ? 'text/html'
+            : lower.endsWith('.js') ? 'application/javascript'
+            : lower.endsWith('.css') ? 'text/css'
+            : lower.endsWith('.json') ? 'application/json'
+            : lower.endsWith('.xml') ? 'application/xml'
+            : lower.endsWith('.png') ? 'image/png'
+            : lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg'
+            : lower.endsWith('.gif') ? 'image/gif'
+            : lower.endsWith('.webp') ? 'image/webp'
+            : lower.endsWith('.mp3') ? 'audio/mpeg'
+            : lower.endsWith('.wav') ? 'audio/wav'
+            : lower.endsWith('.ogg') ? 'audio/ogg'
+            : 'application/octet-stream';
+          await uploadFile('flash-games', prefix + entry.path, entry.blob, mime, { upsert: false });
+          done++;
+          $('publishMessage').textContent = `Subiendo recursos… ${done}/${entries.length}`;
+        }
+
+        const { error } = await sb.from('games').insert({
+          title, description, cover_url: coverUrlValue, swf_url: null,
+          game_type: 'multi_resource', storage_prefix: prefix,
+          main_html_path: mainHtml.path, loader_path: analysis.loader.path,
+          main_swf_path: analysis.mainSwf.path, flashvars: analysis.flashvars,
+          published: true, owner_id: user.id
+        });
+        if (error) throw error;
       }
 
       $('publishMessage').textContent = '✓ Juego publicado correctamente.';
       $('publishForm').reset();
-      showUploadTypeChooser();
+      document.querySelector('input[name="flashUploadType"][value="single"]').checked = true;
+      syncUploadType();
       await loadGames();
     } catch (err) {
       console.error(err);
       $('publishMessage').textContent = `Error: ${err.message || 'No se pudo publicar.'}`;
     }
   });
-
-  function safeName(text) {
-    return text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,50) || 'juego';
-  }
-
-  function ext(name) {
-    const p = name.split('.');
-    return p.length > 1 ? p.pop().toLowerCase() : 'jpg';
-  }
 
   sb.auth.onAuthStateChange(async () => {
     await refreshAdmin();

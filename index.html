@@ -131,36 +131,45 @@
           </div>
           <button id="logoutBtn" class="ghost">Cerrar sesión</button>
         </div>
-
-        <div id="uploadTypeChooser" class="upload-type-chooser">
-          <p class="eyebrow">TIPO DE JUEGO</p>
-          <h3>¿Cómo quieres subirlo?</h3>
-          <p class="muted">Elige según la estructura del juego. Si viene como un ZIP de Flashpoint o necesita imágenes, sonidos, XML u otros archivos, usa la segunda opción.</p>
-          <div class="upload-type-grid">
-            <button type="button" class="upload-type-card" data-upload-type="single">
-              <span class="upload-type-icon">◈</span>
-              <strong>Juego Flash de un solo archivo</strong>
-              <small>Un único archivo <b>.swf</b>, sin recursos externos necesarios.</small>
-            </button>
-            <button type="button" class="upload-type-card" data-upload-type="package">
-              <span class="upload-type-icon">▦</span>
-              <strong>Juego Flash con múltiples recursos</strong>
-              <small>Un <b>.zip</b> con el SWF y todos sus recursos, manteniendo las carpetas.</small>
-            </button>
+        <form id="publishForm" class="form">
+          <div id="uploadTypeChooser" class="upload-type-chooser">
+            <p class="eyebrow">TIPO DE JUEGO</p>
+            <h3>¿Cómo quieres subirlo?</h3>
+            <div class="upload-type-grid">
+              <label class="upload-type-card">
+                <input type="radio" name="flashUploadType" value="single" checked>
+                <span class="upload-type-icon">▣</span>
+                <strong>Juego Flash de un solo archivo</strong>
+                <small>Un único archivo <b>.swf</b> que funciona por sí solo.</small>
+              </label>
+              <label class="upload-type-card">
+                <input type="radio" name="flashUploadType" value="multi">
+                <span class="upload-type-icon">▦</span>
+                <strong>Juego Flash con múltiples recursos</strong>
+                <small>Un <b>.zip</b> de Flashpoint/Inkagames con HTML, loader, SWF, imágenes, sonidos y carpetas.</small>
+              </label>
+            </div>
           </div>
-        </div>
 
-        <form id="publishForm" class="form hidden">
-          <button id="changeUploadType" class="ghost" type="button">← Cambiar tipo de juego</button>
-          <p id="selectedUploadType" class="selected-upload-type"></p>
-          <label>Nombre del juego<input id="gameTitle" type="text" maxlength="80" required></label>
-          <label>Descripción<textarea id="gameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
-          <div class="two-col">
-            <label>Portada<input id="coverFile" type="file" accept="image/png,image/jpeg,image/webp" required></label>
-            <label id="singleSwfField">Juego Flash (.swf)<input id="swfFile" type="file" accept=".swf,application/x-shockwave-flash"></label>
-            <label id="packageZipField" class="hidden">Paquete del juego (.zip)<input id="packageFile" type="file" accept=".zip,application/zip,application/x-zip-compressed"></label>
+          <div id="singleUploadPanel">
+            <label>Nombre del juego<input id="gameTitle" type="text" maxlength="80" required></label>
+            <label>Descripción<textarea id="gameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
+            <div class="two-col">
+              <label>Portada<input id="coverFile" type="file" accept="image/png,image/jpeg,image/webp" required></label>
+              <label>Juego Flash (.swf)<input id="swfFile" type="file" accept=".swf,application/x-shockwave-flash"></label>
+            </div>
           </div>
-          <div id="packageHint" class="package-hint hidden">📦 Se conservará la estructura de carpetas del ZIP y FlashVault usará el SWF principal como punto de entrada.</div>
+
+          <div id="multiUploadPanel" class="hidden">
+            <label>Nombre del juego<input id="multiGameTitle" type="text" maxlength="80"></label>
+            <label>Descripción<textarea id="multiGameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
+            <div class="two-col">
+              <label>Portada<input id="multiCoverFile" type="file" accept="image/png,image/jpeg,image/webp"></label>
+              <label>Paquete Flash (.zip)<input id="packageFile" type="file" accept=".zip,application/zip"></label>
+            </div>
+            <div class="package-help">FlashVault analizará el ZIP, elegirá el HTML de Inkagames que más pese, localizará su loader y su SWF principal, y conservará los demás recursos.</div>
+          </div>
+
           <button class="primary full" type="submit">Publicar en FlashVault</button>
           <p id="publishMessage" class="form-message"></p>
         </form>
