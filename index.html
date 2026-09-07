@@ -10,7 +10,6 @@
   <script src="./ruffle-compat.js"></script>
   <script src="https://unpkg.com/@ruffle-rs/ruffle@nightly/ruffle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -21,7 +20,6 @@
     <nav>
       <a href="#home">Inicio</a>
       <a href="#games">Juegos</a>
-      <button id="adminOpen" class="nav-button">Panel privado</button>
     </nav>
   </header>
 
@@ -30,10 +28,9 @@
       <div class="hero-copy">
         <p class="eyebrow">LA BÓVEDA DE FLASH</p>
         <h1>Juega tus clásicos Flash <span>directamente aquí.</span></h1>
-        <p class="hero-text">Una biblioteca sencilla para publicar tus juegos SWF y hacer que la gente los juegue desde el navegador con Ruffle.</p>
+        <p class="hero-text">Una biblioteca sencilla para jugar juegos SWF desde el navegador con Ruffle.</p>
         <div class="hero-actions">
           <a class="primary" href="#games">Explorar juegos</a>
-          <button class="secondary" id="heroAdmin">Publicar un juego</button>
         </div>
       </div>
       <div class="hero-card">
@@ -77,103 +74,6 @@
       </div>
       <div id="ruffleHost" class="ruffle-host"></div>
       <p id="playerError" class="error-text hidden"></p>
-
-      <section id="resourceDiagnostics" class="resource-diagnostics hidden" aria-labelledby="resourceDiagnosticsTitle" data-admin-only="true">
-        <div class="diagnostics-head">
-          <div>
-            <p class="eyebrow">DIAGNÓSTICO</p>
-            <h3 id="resourceDiagnosticsTitle">Recursos solicitados por el juego</h3>
-            <p class="muted diagnostics-subtitle">FlashVault registra automáticamente las peticiones de recursos del SWF, sin necesitar las herramientas del navegador.</p>
-          </div>
-          <div class="diagnostics-actions">
-            <button id="clearResourceLog" class="ghost" type="button">Limpiar</button>
-            <button id="copyResourceLog" class="ghost" type="button">Copiar informe</button>
-            <button id="downloadResourceLog" class="ghost" type="button">Descargar JSON</button>
-          </div>
-        </div>
-        <div class="resource-summary">
-          <span id="resourceCount">0 solicitudes</span>
-          <span id="resourceOkCount">✓ 0 correctas</span>
-          <span id="resourceFailCount">✗ 0 fallidas</span>
-          <span id="resourcePatchedCount">🩹 0 parcheadas</span>
-        </div>
-        <div id="resourceList" class="resource-list" aria-live="polite">
-          <div class="resource-empty">Todavía no se han registrado recursos.</div>
-        </div>
-      </section>
-    </section>
-  </div>
-
-  <div id="adminModal" class="modal" aria-hidden="true">
-    <div class="modal-backdrop" data-close="admin"></div>
-    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
-      <button class="modal-close" data-close="admin" aria-label="Cerrar">×</button>
-      <div id="adminLoginView">
-        <p class="eyebrow">SOLO ADMINISTRADOR</p>
-        <h2 id="adminTitle">Panel privado</h2>
-        <p class="muted">Inicia sesión con la cuenta de Supabase que autorizaste para publicar.</p>
-        <form id="loginForm" class="form">
-          <label>Correo<input id="email" type="email" required autocomplete="email"></label>
-          <label>Contraseña<input id="password" type="password" required autocomplete="current-password"></label>
-          <label>Clave extra<input id="extraKey" type="password" placeholder="Tu clave local de publicación"></label>
-          <button class="primary full" type="submit">Entrar</button>
-          <p id="loginMessage" class="form-message"></p>
-        </form>
-      </div>
-
-      <div id="adminPublishView" class="hidden">
-        <div class="admin-head">
-          <div>
-            <p class="eyebrow">PUBLICADOR</p>
-            <h2>Subir juego</h2>
-            <p id="signedInAs" class="muted"></p>
-            <p id="diagnosticsStatus" class="diagnostics-private-status">🔒 Diagnóstico privado activo para esta cuenta.</p>
-          </div>
-          <button id="logoutBtn" class="ghost">Cerrar sesión</button>
-        </div>
-        <form id="publishForm" class="form">
-          <div id="uploadTypeChooser" class="upload-type-chooser">
-            <p class="eyebrow">TIPO DE JUEGO</p>
-            <h3>¿Cómo quieres subirlo?</h3>
-            <div class="upload-type-grid">
-              <label class="upload-type-card">
-                <input type="radio" name="flashUploadType" value="single" checked>
-                <span class="upload-type-icon">▣</span>
-                <strong>Juego Flash de un solo archivo</strong>
-                <small>Un único archivo <b>.swf</b> que funciona por sí solo.</small>
-              </label>
-              <label class="upload-type-card">
-                <input type="radio" name="flashUploadType" value="multi">
-                <span class="upload-type-icon">▦</span>
-                <strong>Juego Flash con múltiples recursos</strong>
-                <small>Un <b>.zip</b> de Flashpoint/Inkagames con HTML, loader, SWF, imágenes, sonidos y carpetas.</small>
-              </label>
-            </div>
-          </div>
-
-          <div id="singleUploadPanel">
-            <label>Nombre del juego<input id="gameTitle" type="text" maxlength="80" required></label>
-            <label>Descripción<textarea id="gameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
-            <div class="two-col">
-              <label>Portada<input id="coverFile" type="file" accept="image/png,image/jpeg,image/webp" required></label>
-              <label>Juego Flash (.swf)<input id="swfFile" type="file" accept=".swf,application/x-shockwave-flash"></label>
-            </div>
-          </div>
-
-          <div id="multiUploadPanel" class="hidden">
-            <label>Nombre del juego<input id="multiGameTitle" type="text" maxlength="80"></label>
-            <label>Descripción<textarea id="multiGameDescription" maxlength="500" rows="4" placeholder="Opcional"></textarea></label>
-            <div class="two-col">
-              <label>Portada<input id="multiCoverFile" type="file" accept="image/png,image/jpeg,image/webp"></label>
-              <label>Paquete Flash (.zip)<input id="packageFile" type="file" accept=".zip,application/zip"></label>
-            </div>
-            <div class="package-help">FlashVault analizará el ZIP, elegirá el HTML de Inkagames que más pese, localizará su loader y su SWF principal, y conservará los demás recursos.</div>
-          </div>
-
-          <button class="primary full" type="submit">Publicar en FlashVault</button>
-          <p id="publishMessage" class="form-message"></p>
-        </form>
-      </div>
     </section>
   </div>
 
