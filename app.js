@@ -27,6 +27,21 @@
     $(id).setAttribute('aria-hidden', 'false');
   }
 
+  function setAnalyzingStatus(text) {
+    let el = document.getElementById('playerAnalyzing');
+    if (!el) {
+      el = document.createElement('p');
+      el.id = 'playerAnalyzing';
+      el.className = 'muted';
+      el.style.margin = '10px 0 0';
+      el.style.fontSize = '.85rem';
+      const titleWrap = $('playerModal').querySelector('.player-title-wrap');
+      (titleWrap || $('playerModal').querySelector('.modal-close'))?.after(el);
+    }
+    if (text) { el.textContent = text; el.style.display = ''; }
+    else { el.style.display = 'none'; }
+  }
+
   async function stopActiveGame() {
     try {
       if (fullscreenCleanup) { try { fullscreenCleanup(); } catch (_) {} fullscreenCleanup = null; }
@@ -46,6 +61,8 @@
       activeGameId = null;
       activeGameTitle = '';
       $('ruffleHost').replaceChildren();
+      $('ruffleHost').style.aspectRatio = '';
+      setAnalyzingStatus(null);
     }
   }
 
@@ -141,17 +158,208 @@
       compatibilityRules: true,
       autoplay: 'on',
       playerRuntime: 'flashPlayer',
-      preferredRenderer: 'canvas',
       upgradeToHttps: true,
       quality: 'high',
       scale: 'showAll',
       forceScale: false,
-      wmode: 'opaque',
+      wmode: 'window',
       splashScreen: false,
       showSwfDownload: false,
       contextMenu: 'on',
       logLevel: 'debug',
+      // preferredRenderer se deja SIN definir a propósito: así Ruffle elige
+      // el renderer más compatible con el navegador/GPU del visitante, igual
+      // que hace la demo oficial de Ruffle. El análisis por-juego de más
+      // abajo puede reactivar 'canvas' cuando confirma que es seguro.
     };
+  }
+
+  // ===================================================================
+  // Análisis binario del SWF: lee la cabecera y recorre TODOS los tags
+  // del archivo para detectar qué necesita ese juego en particular, y así
+  // elegir automáticamente el wmode/renderer/calidad más adecuados antes
+  // de reproducirlo. Si algo falla (red, SWF comprimido con LZMA, CORS),
+  // se descarta el análisis y se usa la configuración segura por defecto.
+  // ===================================================================
+
+  async function fetchBytes(url, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, { cache: 'force-cache', signal: controller.signal });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return new Uint8Array(await resp.arrayBuffer());
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function inflateZlib(bytes) {
+    if (typeof DecompressionStream === 'undefined') return null;
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  class BitReader {
+    constructor(bytes, byteOffset = 0) {
+      this.bytes = bytes;
+      this.bytePos = byteOffset;
+      this.bitPos = 0;
+    }
+    readBits(n) {
+      let value = 0;
+      for (let i = 0; i < n; i++) {
+        const byte = this.bytes[this.bytePos] || 0;
+        const bit = (byte >> (7 - this.bitPos)) & 1;
+        value = (value << 1) | bit;
+        this.bitPos++;
+        if (this.bitPos === 8) { this.bitPos = 0; this.bytePos++; }
+      }
+      return value >>> 0;
+    }
+    readSBits(n) {
+      const v = this.readBits(n);
+      return (n > 0 && (v & (1 << (n - 1)))) ? v - (1 << n) : v;
+    }
+    align() { if (this.bitPos !== 0) { this.bitPos = 0; this.bytePos++; } }
+  }
+
+  // Recorre el cuerpo (ya descomprimido) de un SWF y extrae señales reales
+  // sobre cómo está construida la película.
+  function parseSwfInfo(bytes) {
+    const info = {
+      isAS3: false, hasBlendMode: false, hasFilterList: false, hasCacheAsBitmap: false,
+      hasStreamingSound: false, bitmapTagCount: 0, shapeTagCount: 0, spriteTagCount: 0,
+      frameWidth: null, frameHeight: null, frameRate: null, frameCount: null,
+      backgroundColor: null, totalTags: 0,
+    };
+
+    const br = new BitReader(bytes, 8); // salta signature(3)+version(1)+fileLength(4)
+    const nbits = br.readBits(5);
+    const xmin = br.readSBits(nbits), xmax = br.readSBits(nbits);
+    const ymin = br.readSBits(nbits), ymax = br.readSBits(nbits);
+    br.align();
+    info.frameWidth = Math.round((xmax - xmin) / 20);
+    info.frameHeight = Math.round((ymax - ymin) / 20);
+
+    let pos = br.bytePos;
+    info.frameRate = ((bytes[pos + 1] << 8) | bytes[pos]) / 256;
+    pos += 2;
+    info.frameCount = bytes[pos] | (bytes[pos + 1] << 8);
+    pos += 2;
+
+    const total = bytes.length;
+    while (pos + 2 <= total) {
+      const codeAndLength = bytes[pos] | (bytes[pos + 1] << 8);
+      pos += 2;
+      const tagCode = codeAndLength >> 6;
+      let tagLength = codeAndLength & 0x3f;
+      if (tagLength === 0x3f) {
+        if (pos + 4 > total) break;
+        tagLength = (bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)) >>> 0;
+        pos += 4;
+      }
+      if (pos + tagLength > total) break; // archivo truncado/corrupto: paramos sin romper nada
+      info.totalTags++;
+
+      switch (tagCode) {
+        case 0: pos = total; break; // End
+        case 9: // SetBackgroundColor
+          if (tagLength >= 3) info.backgroundColor = `rgb(${bytes[pos]},${bytes[pos+1]},${bytes[pos+2]})`;
+          break;
+        case 69: // FileAttributes: bit 0x08 = ActionScript3
+          info.isAS3 = !!(bytes[pos] & 0x08);
+          break;
+        case 82: // DoABC -> bytecode AS3
+          info.isAS3 = true;
+          break;
+        case 70: { // PlaceObject3: banderas de blend mode / filtros / cacheAsBitmap
+          const flagsByte0 = bytes[pos];
+          info.hasCacheAsBitmap = info.hasCacheAsBitmap || !!(flagsByte0 & 0x04);
+          info.hasBlendMode = info.hasBlendMode || !!(flagsByte0 & 0x02);
+          info.hasFilterList = info.hasFilterList || !!(flagsByte0 & 0x01);
+          break;
+        }
+        case 6: case 21: case 35: case 90: // DefineBits(JPEG/JPEG2/JPEG3/JPEG4)
+        case 20: case 36: // DefineBitsLossless(2)
+          info.bitmapTagCount++;
+          break;
+        case 2: case 22: case 32: case 83: // DefineShape(2/3/4)
+          info.shapeTagCount++;
+          break;
+        case 39: // DefineSprite
+          info.spriteTagCount++;
+          break;
+        case 18: case 45: case 19: // SoundStreamHead(2), SoundStreamBlock
+          info.hasStreamingSound = true;
+          break;
+      }
+      pos += tagLength;
+    }
+    return info;
+  }
+
+  async function analyzeGameSwf(url) {
+    try {
+      const bytes = await fetchBytes(url);
+      const signature = String.fromCharCode(bytes[0], bytes[1], bytes[2]);
+      let body = bytes;
+      if (signature === 'CWS') {
+        const inflated = await inflateZlib(bytes.slice(8));
+        if (!inflated) return null; // el navegador no pudo descomprimir: sin análisis
+        body = new Uint8Array(8 + inflated.length);
+        body.set(bytes.slice(0, 8), 0);
+        body.set(inflated, 8);
+      } else if (signature !== 'FWS') {
+        return null; // ZWS (LZMA) u otro formato: no lo analizamos
+      }
+      return parseSwfInfo(body);
+    } catch (err) {
+      console.warn('[FlashVault] No se pudo analizar el SWF para autoconfigurar Ruffle:', err);
+      return null;
+    }
+  }
+
+  // A partir de lo detectado en el SWF, decide la configuración de Ruffle
+  // más adecuada para ESE juego en particular.
+  function chooseOptionsForSwf(info) {
+    const richVisuals = info.hasBlendMode || info.hasFilterList || info.hasCacheAsBitmap
+      || info.bitmapTagCount > 3 || info.isAS3;
+    const patch = {
+      quality: info.bitmapTagCount > info.shapeTagCount ? 'medium' : 'high',
+    };
+    if (richVisuals) {
+      // Blend modes, filtros, cacheAsBitmap o AS3 con muchos bitmaps: el modo
+      // más compatible es dejar que Ruffle elija el renderer y usar wmode
+      // 'window' (evita fondos en blanco/recortados como el que reportaste).
+      patch.wmode = 'window';
+    } else {
+      // Película simple, vectorial, sin efectos de composición: 'opaque' +
+      // canvas es seguro aquí y va un poco más liviano.
+      patch.wmode = 'opaque';
+      patch.preferredRenderer = 'canvas';
+    }
+    return patch;
+  }
+
+  async function buildSmartOptions(analysisUrl, label) {
+    if (!analysisUrl) return null;
+    const info = await analyzeGameSwf(analysisUrl);
+    if (!info) return null;
+    const patch = chooseOptionsForSwf(info);
+    console.info(`[FlashVault] "${label}" analizado (${info.totalTags} tags, ${info.isAS3 ? 'AS3' : 'AS1/2'}):`, info, '→ configuración:', patch);
+    return { patch, frameWidth: info.frameWidth, frameHeight: info.frameHeight };
+  }
+
+  function applyStageAspectRatio(smart) {
+    const host = $('ruffleHost');
+    const w = smart?.frameWidth, h = smart?.frameHeight;
+    if (w > 0 && h > 0 && w < 8000 && h < 8000) host.style.aspectRatio = `${w} / ${h}`;
+    else host.style.aspectRatio = '';
   }
 
   function installFullscreenButton(api, player) {
@@ -204,7 +412,22 @@
     try {
       const { player, api } = await createPlayer();
       installFullscreenButton(api, player);
-      const common = commonRuffleOptions();
+
+      // Analiza el SWF real que se va a ejecutar primero (el loader en
+      // paquetes multi-recurso, o el único SWF si es un juego simple) para
+      // elegir la mejor configuración para ESTE juego en particular.
+      setAnalyzingStatus('Analizando el juego para elegir la mejor configuración…');
+      let smart = null;
+      try {
+        const analysisUrl = (game.game_type === 'multi_resource' && game.storage_prefix && game.loader_path)
+          ? publicPackageUrl(game.storage_prefix, game.loader_path)
+          : game.swf_url;
+        smart = await buildSmartOptions(analysisUrl, game.title);
+      } catch (_) { /* seguimos con la configuración por defecto */ }
+      setAnalyzingStatus(null);
+      applyStageAspectRatio(smart);
+
+      const common = { ...commonRuffleOptions(), ...(smart?.patch || {}) };
 
       if (game.game_type === 'multi_resource' && game.storage_prefix && game.main_html_path && game.loader_path) {
         const flashvars = game.flashvars && typeof game.flashvars === 'object' ? game.flashvars : {};
@@ -239,10 +462,15 @@
         fallback.className = 'ghost player-fallback';
         fallback.textContent = 'Cargar SWF principal directamente';
         fallback.onclick = async () => {
-          const mainUrl = originalPackageUrl(game.main_swf_path);
-          const directOptions = { ...common, url: mainUrl, base: originalPackageUrl(dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
           fallback.disabled = true;
-          fallback.textContent = 'Cargando SWF principal…';
+          fallback.textContent = 'Analizando y cargando…';
+          let mainSmart = null;
+          try {
+            mainSmart = await buildSmartOptions(publicPackageUrl(game.storage_prefix, game.main_swf_path), game.title + ' (SWF principal)');
+          } catch (_) {}
+          applyStageAspectRatio(mainSmart);
+          const mainUrl = originalPackageUrl(game.main_swf_path);
+          const directOptions = { ...common, ...(mainSmart?.patch || {}), url: mainUrl, base: originalPackageUrl(dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
           try {
             if (typeof api.load === 'function') await api.load(directOptions);
             else await player.load(directOptions);
@@ -263,6 +491,7 @@
       }
     } catch (err) {
       console.error(err);
+      setAnalyzingStatus(null);
       $('playerError').textContent = err.message || 'No se pudo iniciar el juego.';
       $('playerError').classList.remove('hidden');
     }
