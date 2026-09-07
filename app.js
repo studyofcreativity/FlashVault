@@ -419,8 +419,8 @@
       setAnalyzingStatus('Analizando el juego para elegir la mejor configuración…');
       let smart = null;
       try {
-        const analysisUrl = (game.game_type === 'multi_resource' && game.storage_prefix && game.loader_path)
-          ? publicPackageUrl(game.storage_prefix, game.loader_path)
+        const analysisUrl = (game.game_type === 'multi_resource' && game.storage_prefix)
+          ? publicPackageUrl(game.storage_prefix, game.loader_path || game.main_swf_path)
           : game.swf_url;
         smart = await buildSmartOptions(analysisUrl, game.title);
       } catch (_) { /* seguimos con la configuración por defecto */ }
@@ -429,17 +429,22 @@
 
       const common = { ...commonRuffleOptions(), ...(smart?.patch || {}) };
 
-      if (game.game_type === 'multi_resource' && game.storage_prefix && game.main_html_path && game.loader_path) {
+      if (game.game_type === 'multi_resource' && game.storage_prefix && game.main_html_path && (game.loader_path || game.main_swf_path)) {
         const flashvars = game.flashvars && typeof game.flashvars === 'object' ? game.flashvars : {};
         const mainName = game.main_swf_path ? game.main_swf_path.split('/').pop() : (flashvars.NombreSWF || flashvars.nameSWF || '');
         if (!mainName) throw new Error('No hay SWF principal configurado para este paquete.');
+
+        // Algunos juegos de Inkagames no usan loader intermedio: el HTML
+        // carga el SWF principal directamente. En ese caso game.loader_path
+        // es null y arrancamos directo con el SWF principal.
+        const entryPath = game.loader_path || game.main_swf_path;
 
         // OJO: usamos la URL ORIGINAL (dominio de Inkagames), no la de Supabase,
         // como "url"/"base" que ve Ruffle. Así el juego cree que sigue en su
         // dominio de siempre (pasa el candado anti-piratería) mientras
         // urlRewriteRules redirige la descarga real hacia el storage.
-        const loaderUrl = originalPackageUrl(game.loader_path);
-        const loaderBase = originalPackageUrl(dirname(game.loader_path));
+        const loaderUrl = originalPackageUrl(entryPath);
+        const loaderBase = originalPackageUrl(dirname(entryPath));
         const parameters = { ...flashvars, NombreSWF: mainName };
 
         const rewriteRules = makeRuffleRewriteRules(game.storage_prefix);
@@ -457,31 +462,34 @@
         // Archived Inkagames loaders can finish their own loading screen while
         // failing to render the game movie. Keep a safe manual fallback to the
         // detected main SWF, using the same FlashVars and URL rewriting rules.
-        const fallback = document.createElement('button');
-        fallback.type = 'button';
-        fallback.className = 'ghost player-fallback';
-        fallback.textContent = 'Cargar SWF principal directamente';
-        fallback.onclick = async () => {
-          fallback.disabled = true;
-          fallback.textContent = 'Analizando y cargando…';
-          let mainSmart = null;
-          try {
-            mainSmart = await buildSmartOptions(publicPackageUrl(game.storage_prefix, game.main_swf_path), game.title + ' (SWF principal)');
-          } catch (_) {}
-          applyStageAspectRatio(mainSmart);
-          const mainUrl = originalPackageUrl(game.main_swf_path);
-          const directOptions = { ...common, ...(mainSmart?.patch || {}), url: mainUrl, base: originalPackageUrl(dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
-          try {
-            if (typeof api.load === 'function') await api.load(directOptions);
-            else await player.load(directOptions);
-            fallback.remove();
-          } catch (e) {
-            fallback.disabled = false;
-            fallback.textContent = 'Reintentar SWF principal';
-            console.error(e);
-          }
-        };
-        $('playerModal').querySelector('.player-toolbar')?.prepend(fallback);
+        // Si no hay loader, ya estamos cargando el SWF principal: el botón no aporta nada.
+        if (game.loader_path && game.main_swf_path) {
+          const fallback = document.createElement('button');
+          fallback.type = 'button';
+          fallback.className = 'ghost player-fallback';
+          fallback.textContent = 'Cargar SWF principal directamente';
+          fallback.onclick = async () => {
+            fallback.disabled = true;
+            fallback.textContent = 'Analizando y cargando…';
+            let mainSmart = null;
+            try {
+              mainSmart = await buildSmartOptions(publicPackageUrl(game.storage_prefix, game.main_swf_path), game.title + ' (SWF principal)');
+            } catch (_) {}
+            applyStageAspectRatio(mainSmart);
+            const mainUrl = originalPackageUrl(game.main_swf_path);
+            const directOptions = { ...common, ...(mainSmart?.patch || {}), url: mainUrl, base: originalPackageUrl(dirname(game.main_swf_path)), parameters, urlRewriteRules: rewriteRules };
+            try {
+              if (typeof api.load === 'function') await api.load(directOptions);
+              else await player.load(directOptions);
+              fallback.remove();
+            } catch (e) {
+              fallback.disabled = false;
+              fallback.textContent = 'Reintentar SWF principal';
+              console.error(e);
+            }
+          };
+          $('playerModal').querySelector('.player-toolbar')?.prepend(fallback);
+        }
       } else if (game.swf_url) {
         const options = { ...common, url: game.swf_url };
         if (typeof api.load === 'function') await api.load(options);
