@@ -110,92 +110,6 @@
     return i >= 0 ? p.slice(0, i + 1) : '';
   }
 
-  function escapeRegExp(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  // Ruta de "target" relativa al directorio de "basePath" (ambos son rutas
-  // dentro del paquete subido, ej. basePath="futurama.html", target="loader/x.swf"
-  // -> "loader/x.swf"; basePath="juego/index.html", target="juego/loader/x.swf"
-  // -> "loader/x.swf").
-  function pathRelativeTo(basePath, targetPath) {
-    const baseDir = dirname(basePath);
-    const t = normalizePackagePath(targetPath);
-    if (baseDir && t.toLowerCase().startsWith(baseDir.toLowerCase())) return t.slice(baseDir.length);
-    return t;
-  }
-
-  // Reconstruye la URL "original" que el SWF/loader debe creer que es la suya
-  // (loaderInfo.url), para pasar el candado de dominio anti-piratería, aunque
-  // los bytes reales se descarguen del storage gracias a las urlRewriteRules.
-  //
-  // Si el juego tiene origin_url (URL real de la página, pegada al publicar),
-  // resolvemos la ruta del archivo relativa a esa página: es el mecanismo
-  // nuevo y no depende de cómo esté organizada la carpeta subida.
-  //
-  // Si no tiene origin_url (paquetes ZIP antiguos), usamos el truco anterior:
-  // la ruta guardada ya venía con la estructura de dominio incluida
-  // (ej. "www.inkagames.com/loader/x.swf").
-  function originalPackageUrl(game, path) {
-    if (game && game.origin_url) {
-      try {
-        const rel = pathRelativeTo(game.main_html_path, path);
-        return new URL(rel, game.origin_url).href;
-      } catch (_) { /* URL inválida: seguimos con el modo antiguo */ }
-    }
-    return 'http://' + normalizePackagePath(path);
-  }
-
-  function makeRuffleRewriteRules(game) {
-    const base = publicPackageUrl(game.storage_prefix);
-    const mappings = [];
-
-    // Dominios "clásicos" (paquetes ZIP antiguos ya organizados con la
-    // estructura de carpetas del dominio real, ej. "www.inkagames.com/...").
-    const legacyDomains = ['inkagames.com', 'inkagames.info', 'patajuegos.com', 'uploads.ungrounded.net'];
-    for (const domain of legacyDomains) {
-      mappings.push({ hostname: domain, urlDir: '/', storageDir: 'www.' + domain + '/' });
-    }
-
-    // URL real proporcionada al publicar este juego: el engaño específico
-    // de este paquete. Va primero para tener prioridad si coincide con algún
-    // dominio "clásico".
-    if (game.origin_url) {
-      try {
-        const origin = new URL(game.origin_url);
-        const hostname = origin.hostname.replace(/^www\./i, '');
-        const i = origin.pathname.lastIndexOf('/');
-        const urlDir = i >= 0 ? origin.pathname.slice(0, i + 1) : '/';
-        const storageDir = dirname(game.main_html_path);
-        mappings.unshift({ hostname, urlDir, storageDir });
-      } catch (_) { /* URL inválida, se ignora */ }
-    }
-
-    const rules = [];
-    for (const { hostname, urlDir, storageDir } of mappings) {
-      const escd = escapeRegExp(hostname);
-      const dirEsc = escapeRegExp(urlDir);
-
-      // Muchos juegos de este motor (Inkagames) llaman a scripts de servidor
-      // que ya no existen (idioma.php, save_terrain_data.php, fast_testing.php...).
-      // Como son .php/.cgi/.asp nunca los vamos a poder subir como archivo
-      // estático: si dejamos que caigan en la reescritura normal, terminan
-      // pidiendo un archivo que no existe en el storage (404) y el juego se
-      // queda esperando esa respuesta para siempre -> pantalla negra tras el 100%.
-      // Por eso van ANTES de las reglas normales y responden al instante con
-      // un cuerpo vacío (data: URI, no toca la red) en vez de esperar un 404.
-      rules.push([new RegExp('^https?:\\/\\/(?:www\\.)?' + escd + '\\/.*\\.(?:php|cgi|asp|aspx)(?:\\?.*)?$', 'i'), 'data:text/plain,']);
-      rules.push([new RegExp('^\\/\\/(?:www\\.)?' + escd + '\\/.*\\.(?:php|cgi|asp|aspx)(?:\\?.*)?$', 'i'), 'data:text/plain,']);
-
-      // Reescritura normal: cualquier petición dentro de urlDir en ese dominio
-      // se redirige al storage real, respetando la misma ruta relativa.
-      const dest = base + '/' + storageDir + '$1';
-      rules.push([new RegExp('^https?:\\/\\/(?:www\\.)?' + escd + dirEsc + '(.*)$', 'i'), dest]);
-      rules.push([new RegExp('^\\/\\/(?:www\\.)?' + escd + dirEsc + '(.*)$', 'i'), dest]);
-    }
-    return rules;
-  }
-
   function commonRuffleOptions() {
     return {
       allowNetworking: 'all',
@@ -485,21 +399,16 @@
         // es null y arrancamos directo con el SWF principal.
         const entryPath = game.loader_path || game.main_swf_path;
 
-        // OJO: usamos la URL ORIGINAL (dominio de Inkagames), no la de Supabase,
-        // como "url"/"base" que ve Ruffle. Así el juego cree que sigue en su
-        // dominio de siempre (pasa el candado anti-piratería) mientras
-        // urlRewriteRules redirige la descarga real hacia el storage.
-        const loaderUrl = originalPackageUrl(game, entryPath);
+        // Cargamos el loader/SWF directamente desde su URL real en Storage.
+        const loaderUrl = publicPackageUrl(game.storage_prefix, entryPath);
         const loaderBase = new URL('.', loaderUrl).href;
         const parameters = { ...flashvars, NombreSWF: mainName };
 
-        const rewriteRules = makeRuffleRewriteRules(game);
         const options = {
           ...common,
           url: loaderUrl,
           base: loaderBase,
-          parameters,
-          urlRewriteRules: rewriteRules
+          parameters
         };
 
         if (typeof api.load === 'function') await api.load(options);
@@ -522,8 +431,8 @@
               mainSmart = await buildSmartOptions(publicPackageUrl(game.storage_prefix, game.main_swf_path), game.title + ' (SWF principal)');
             } catch (_) {}
             applyStageAspectRatio(mainSmart);
-            const mainUrl = originalPackageUrl(game, game.main_swf_path);
-            const directOptions = { ...common, ...(mainSmart?.patch || {}), url: mainUrl, base: new URL('.', mainUrl).href, parameters, urlRewriteRules: rewriteRules };
+            const mainUrl = publicPackageUrl(game.storage_prefix, game.main_swf_path);
+            const directOptions = { ...common, ...(mainSmart?.patch || {}), url: mainUrl, base: new URL('.', mainUrl).href, parameters };
             try {
               if (typeof api.load === 'function') await api.load(directOptions);
               else await player.load(directOptions);
@@ -553,7 +462,7 @@
 
   async function loadGames() {
     let result = await sb.from('games')
-      .select('id,title,description,swf_url,cover_url,created_at,game_type,storage_prefix,main_html_path,loader_path,main_swf_path,flashvars,origin_url')
+      .select('id,title,description,swf_url,cover_url,created_at,game_type,storage_prefix,main_html_path,loader_path,main_swf_path,flashvars')
       .eq('published', true)
       .order('created_at', { ascending: false });
 
